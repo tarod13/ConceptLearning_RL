@@ -256,7 +256,8 @@ class Agent:
             self.evolution_model = nextSNet(s_dim, self.n_m_states, self.n_m_actions, n_tasks=self.n_tasks).to(device)
             self.reward_model = rNet(s_dim, self.n_m_actions, n_tasks=self.n_tasks, lr=self.params['r_lr']).to(device)
             # self.reward_model = RNet(n_m_states, n_tasks=n_tasks, lr=r_lr).to(device)
-            self.meta_critic = np.ones([self.n_tasks, self.n_m_states, self.n_m_actions])/self.alpha
+            # self.meta_critic = np.random.rand(self.n_tasks, self.n_m_states, self.n_m_actions)/self.alpha
+            self.meta_critic = np.zeros([self.n_tasks, self.n_m_states, self.n_m_actions])
             if self.multitask:
                 self.meta_actor = np.ones([self.n_tasks, self.n_m_states, self.n_m_actions])/self.n_m_actions
             else:
@@ -394,11 +395,84 @@ class Agent:
         self.past_actions.append(action.copy())
         self.time_flow(done, task, completed_episode, r, state, action, action_llhoods)
 
+    # def time_flow(self, done, task, completed_episode, r, state, action, action_llhoods): 
+    #     to_learn_complete = self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0       
+    #     if to_learn_complete:
+    #         if self.hierarchical:
+    #             # learning_event = np.empty(7+2*self.n_m_states)
+    #             learning_event = np.empty(7)
+    #             learning_event[0] = self.past_m_state
+    #             learning_event[1] = self.past_m_action
+    #             learning_event[2] = self.cumulative_reward - r
+    #             learning_event[3] = self.m_state
+    #             learning_event[4] = self.m_action
+    #             learning_event[5] = float(done)
+    #             learning_event[6] = task
+    #             # learning_event[7:7+self.n_m_states] = self.past_posterior.copy()
+    #             # learning_event[7+self.n_m_states:] = self.posterior.copy()
+    #             self.meta_learning(learning_event.copy())
+
+    #         storing_event = np.empty(self.N_s_dim+self.upper_level_period*self.a_dim+self.n_m_actions+3)
+    #         for i in range(0, self.upper_level_period+1):
+    #             storing_event[i*self.s_dim:(i+1)*self.s_dim] = self.past_states[i].copy()
+    #             if i < self.upper_level_period:
+    #                 storing_event[self.N_s_dim + i*self.a_dim : self.N_s_dim + (i+1)*self.a_dim] = self.past_actions[i].copy()
+    #         storing_event[self.N_s_dim + self.upper_level_period*self.a_dim:-3] = self.action_llhoods - action_llhoods.copy()
+    #         storing_event[-3] = self.past_m_action
+    #         storing_event[-2] = task
+    #         storing_event[-1] = self.cumulative_reward - r
+    #         self.memorize_in_upper_level(storing_event)
+    #         # self.train_reward_model(task, self.past_states, self.cumulative_reward - r)
+    #         # self.train_evolution_model(task, self.past_states, state, self.past_m_action)
+
+    #         self.past_states = [state.copy()]
+    #         self.past_actions = [action.copy()]
+    #         self.action_llhoods = action_llhoods.copy()
+    #         self.cumulative_reward = r
+    #         self.stored = False
+    #         if self.upper_level_annealing:
+    #             self.alpha_upper_level = np.max([self.coefficient_upper_annealing * self.alpha_upper_level, self.min_alpha_upper_level])
+
+    #     if not self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0:
+    #         self.past_m_state = self.m_state
+    #         self.past_m_action = self.m_action
+    #         # self.past_posterior = self.posterior.copy()
+    #         # self.past_states = state.copy()
+    #         self.stored = True
+        
+    #     if done and not to_learn_complete and self.hierarchical:
+    #         # event = np.empty(7+2*self.n_m_states)
+    #         event = np.empty(7)
+    #         event[0] = self.m_state
+    #         event[1] = self.m_action
+    #         event[2] = self.cumulative_reward
+    #         event[3] = self.m_state
+    #         event[4] = self.m_action
+    #         event[5] = float(done)
+    #         event[6] = task
+    #         # event[7:7+self.n_m_states] = self.past_posterior.copy()
+    #         # PS = self.concept_model.sample_m_state(torch.from_numpy(state).float().to(device), explore=True)[1]
+    #         # event[7+self.n_m_states:] = PS.detach().cpu().numpy().copy()
+    #         self.meta_learning(event.copy())
+    #         # self.train_reward_model(task, self.past_states, self.cumulative_reward)
+    #         # self.train_evolution_model(task, self.past_states, state, self.m_action)     
+
+    #         # storing_event = np.empty(2*self.s_dim+3)
+    #         # storing_event[:self.s_dim] = self.past_states.copy()
+    #         # storing_event[self.s_dim:2*self.s_dim] = state.copy()
+    #         # storing_event[-3] = self.m_action
+    #         # storing_event[-2] = task
+    #         # storing_event[-1] = self.cumulative_reward
+    #         # self.memorize_in_upper_level(storing_event)               
+
+    #     self.bottom_level_epsds += 1
+
+    #     if done or completed_episode:
+    #         self.reset_upper_level() 
     def time_flow(self, done, task, completed_episode, r, state, action, action_llhoods): 
         to_learn_complete = self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0       
         if to_learn_complete:
             if self.hierarchical:
-                # learning_event = np.empty(7+2*self.n_m_states)
                 learning_event = np.empty(7)
                 learning_event[0] = self.past_m_state
                 learning_event[1] = self.past_m_action
@@ -407,8 +481,6 @@ class Agent:
                 learning_event[4] = self.m_action
                 learning_event[5] = float(done)
                 learning_event[6] = task
-                # learning_event[7:7+self.n_m_states] = self.past_posterior.copy()
-                # learning_event[7+self.n_m_states:] = self.posterior.copy()
                 self.meta_learning(learning_event.copy())
 
             storing_event = np.empty(self.N_s_dim+self.upper_level_period*self.a_dim+self.n_m_actions+3)
@@ -429,18 +501,15 @@ class Agent:
             self.action_llhoods = action_llhoods.copy()
             self.cumulative_reward = r
             self.stored = False
-            if self.upper_level_annealing:
-                self.alpha_upper_level = np.max([self.coefficient_upper_annealing * self.alpha_upper_level, self.min_alpha_upper_level])
+            self.alpha_upper_level = np.max([0.999993*self.alpha_upper_level, 5e-2])
 
         if not self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0:
             self.past_m_state = self.m_state
             self.past_m_action = self.m_action
-            # self.past_posterior = self.posterior.copy()
             # self.past_states = state.copy()
             self.stored = True
         
         if done and not to_learn_complete and self.hierarchical:
-            # event = np.empty(7+2*self.n_m_states)
             event = np.empty(7)
             event[0] = self.m_state
             event[1] = self.m_action
@@ -449,25 +518,12 @@ class Agent:
             event[4] = self.m_action
             event[5] = float(done)
             event[6] = task
-            # event[7:7+self.n_m_states] = self.past_posterior.copy()
-            # PS = self.concept_model.sample_m_state(torch.from_numpy(state).float().to(device), explore=True)[1]
-            # event[7+self.n_m_states:] = PS.detach().cpu().numpy().copy()
             self.meta_learning(event.copy())
-            # self.train_reward_model(task, self.past_states, self.cumulative_reward)
-            # self.train_evolution_model(task, self.past_states, state, self.m_action)     
-
-            # storing_event = np.empty(2*self.s_dim+3)
-            # storing_event[:self.s_dim] = self.past_states.copy()
-            # storing_event[self.s_dim:2*self.s_dim] = state.copy()
-            # storing_event[-3] = self.m_action
-            # storing_event[-2] = task
-            # storing_event[-1] = self.cumulative_reward
-            # self.memorize_in_upper_level(storing_event)               
 
         self.bottom_level_epsds += 1
 
         if done or completed_episode:
-            self.reset_upper_level()       
+            self.reset_upper_level()             
 
     def reset_upper_level(self):
         self.past_states = []
@@ -930,8 +986,8 @@ class System:
             else:
                 self.envs[self.task].reset()
             
-            if self.hierarchical:
-                self.agent.reset_upper_level()
+            # if self.hierarchical:
+            self.agent.reset_upper_level()
     
     def get_obs(self):
         if self.original_state:
@@ -987,8 +1043,8 @@ class System:
         else:
             event[self.sarsd_dim] = reward
         
-        if self.hierarchical:
-            self.agent.update_upper_level(event[self.sarsd_dim], done, self.task, epsd_step>=self.envs[self.task]._max_episode_steps, state, action, action_llhood)    
+        # if self.hierarchical:
+        self.agent.update_upper_level(event[self.sarsd_dim], done, self.task, epsd_step>=self.envs[self.task]._max_episode_steps, state, action, action_llhood)    
         
         self.agent.memorize(event)   
         return event
@@ -1269,14 +1325,14 @@ class System:
 
         if self.hierarchical:
             metric_vector = np.array([Ha_As_average, HS_average, HS_s_average, ISs_average, unique_average, HnS_AT_average, HnS_SAT_average, InSS_AT_average, HR_ST_average, HR_T_average, IRS_T_average, Ha_s_average, Ha_s_average-Ha_As_average, HA_s_average, Ha_s_average-HA_s_average, HA_average]) 
-            sum = self.agent.beta + self.agent.eta + self.agent.nu
-            if ISs_average < self.iss_threshold * np.log(self.agent.n_m_states):                
-                beta = self.beta_coefficient * self.agent.beta                
-            else:
-                beta = self.agent.beta / self.beta_coefficient
-            self.agent.eta = self.agent.eta * sum / (sum-self.agent.beta+beta)
-            self.agent.nu = self.agent.nu * sum / (sum-self.agent.beta+beta)
-            self.agent.beta = beta * sum / (sum-self.agent.beta+beta)
+            # sum = self.agent.beta + self.agent.eta + self.agent.nu
+            # if ISs_average < self.iss_threshold * np.log(self.agent.n_m_states):                
+            #     beta = self.beta_coefficient * self.agent.beta                
+            # else:
+            #     beta = self.agent.beta / self.beta_coefficient
+            # self.agent.eta = self.agent.eta * sum / (sum-self.agent.beta+beta)
+            # self.agent.nu = self.agent.nu * sum / (sum-self.agent.beta+beta)
+            # self.agent.beta = beta * sum / (sum-self.agent.beta+beta)
             if self.multitask:
                 return rewards, goal_rewards, np.array(events), metric_vector, np.array(epsd_lenghts)
             else:

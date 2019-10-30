@@ -6,7 +6,7 @@ import pickle
 def exists_folder(f_name):
     return os.path.isdir(f_name)
 
-n_test = 117
+n_test = 120
 last_iter = 0
 tr_epsds = 4000
 
@@ -113,8 +113,8 @@ if not started:
                     'beta': 1/reward_scale,
                     'eta': 1/reward_scale,
                     'nu': 2/reward_scale,
-                    'zeta': (1e-1)/reward_scale,
-                    'alpha_upper_level': (1e+4)/reward_scale,
+                    'zeta': 1e-1/reward_scale,
+                    'alpha_upper_level': 1e+5/reward_scale,
                     'seed': seed,                    
                     'r_lr': 3e-4,
                     'cm_lr': 3e-4,
@@ -123,7 +123,8 @@ if not started:
                     'reward_learning': 'with_concept',
                     'memory_capacity': 400000,
                     'policy_latent_dim': 0,
-                    'inconsistency_metric': 'poly'
+                    'inconsistency_metric': 'poly',
+                    'body_position': True
                 }    
 
     system = System(params, agent_params=agent_params)
