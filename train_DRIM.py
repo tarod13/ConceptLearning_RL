@@ -6,7 +6,7 @@ import pickle
 def exists_folder(f_name):
     return os.path.isdir(f_name)
 
-n_test = 120
+n_test = 130
 last_iter = 0
 tr_epsds = 4000
 
@@ -92,7 +92,7 @@ if not started:
     params = {
                 'env_names': env_names,
                 'env_steps': env_steps,
-                'init_steps': 10000,
+                'init_steps': 1000,
                 'seed': seed,
                 'beta_coefficient': 1.0,
                 'basic_epsds': 0,
@@ -107,16 +107,18 @@ if not started:
                     'n_m_actions': 8, 
                     'n_m_states': 8,
                     'upper_level_period': upper_level_period,
-                    'skill_steps': 9,                                        
+                    'skill_steps': 9,
+                    'p_lr': 3e-4,                                        
                     'alpha': 1.5/reward_scale,
                     'mu': 0.5/reward_scale,
-                    'beta': 1/reward_scale,
-                    'eta': 1/reward_scale,
-                    'nu': 2/reward_scale,
+                    'beta': 4/reward_scale,
+                    'eta': 0.5/reward_scale,
+                    'nu': 4/reward_scale,
                     'zeta': 1e-1/reward_scale,
-                    'alpha_upper_level': 1e+5/reward_scale,
+                    'xi': 2/reward_scale,
+                    'alpha_upper_level': 5e-2,
                     'seed': seed,                    
-                    'r_lr': 3e-4,
+                    'r_lr': 3e-3,
                     'cm_lr': 3e-4,
                     'policy_batch_size': batch_size,
                     'concept_batch_size': 512,                    
@@ -124,7 +126,8 @@ if not started:
                     'memory_capacity': 400000,
                     'policy_latent_dim': 0,
                     'inconsistency_metric': 'poly',
-                    'body_position': True
+                    'body_position': True,
+                    'model_update_method': 'distribution'
                 }    
 
     system = System(params, agent_params=agent_params)
