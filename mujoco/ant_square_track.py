@@ -74,15 +74,18 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         orientation = q_mult(q_mult(rotation_quaternion, orientation_quaternion), q_inv(rotation_quaternion))[1:]
         return orientation
 
+
     @property
     def head_position(self):
-        return np.asarray(self.model.geom_pos[self.model.geom_names.index('head')], dtype=np.float64)
+        local_head_position = np.asarray(self.model.geom_pos[self.model.geom_names.index('head')], dtype=np.float64)
+        global_head_position = self.body_position + local_head_position
+        return global_head_position
     
     @property
     def body_position(self):
         return np.asarray(self.get_body_com("torso")[:3], dtype=np.float64)
 
-    def get_current_maze_obs(self):   
+    def get_current_maze_obs(self):  
         wall_readings = np.zeros(self._n_rays)
         self._goal_readings = np.zeros(self._n_rays)
         danger_readings = np.zeros(self._n_rays)
@@ -91,7 +94,7 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             ray_theta = self._ray_angles[ray]
             ray_orientation = np.asarray(self.ray_orientation(ray_theta), dtype=np.float64)
             distance, obstacle_id = self.sim.ray_fast_group(self.head_position, ray_orientation, self._obstacle_filter)           
-            if obstacle_id >= 0 and distance <= self._sensor_range:
+            if distance <= self._sensor_range:
                 if self._obstacle_types[obstacle_id] == 1:
                     wall_readings[ray] = (self._sensor_range - distance) / self._sensor_range
                 elif self._obstacle_types[obstacle_id] == 2:
@@ -221,8 +224,6 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.randn(
             self.model.nv)
         self.set_state(qpos, qvel)
-
-        self._goal_readings = np.zeros(self._n_rays)
 
         observation = self._get_obs()
 
