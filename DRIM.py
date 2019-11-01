@@ -126,6 +126,7 @@ class Agent:
                             'parallel_learning': False,
                             'reward_learning': 'with_concept',
                             'alpha_upper_level': 10.0,
+                            'delta_upper_level': 1e-1,
                             'upper_level_period': 3, 
                             'concept_model_type': 'encoder',
                             'policy_batch_size': 256,
@@ -139,7 +140,7 @@ class Agent:
                             'mu': 1.0, 
                             'nu': 1.0,
                             'zeta': 1.0,
-                            'xi': 10.0, 
+                            'xi': 1.0, 
                             'hidden_dim': 256,
                             'min_log_stdev': -20, 
                             'max_log_stdev': 2,
@@ -162,7 +163,8 @@ class Agent:
                             'model_update_method': 'discrete',
                             'tau_upper_level': 1.0,
                             'coefficient_upper_annealing': 0.999993,
-                            'min_alpha_upper_level': 5e-2
+                            'min_alpha_upper_level': 5e-2,
+                            'evaluation_upper_level_steps': 32
                         }
         
         for key, value in default_params.items():
@@ -183,6 +185,7 @@ class Agent:
         self.n_tasks = self.params['n_tasks']
         self.upper_level_period = self.params['upper_level_period']
         self.alpha_upper_level = self.params['alpha_upper_level']
+        self.delta_upper_level = self.params['delta_upper_level']
         self.min_alpha_upper_level = self.params['min_alpha_upper_level']
         self.gamma = self.params['gamma']
         self.skill_steps = self.params['skill_steps']
@@ -194,6 +197,7 @@ class Agent:
         self.coefficient_upper_annealing = self.params['coefficient_upper_annealing']
         self.model_update_method = self.params['model_update_method']
         self.tau_upper_level = self.params['tau_upper_level']
+        self.evaluation_upper_level_steps = self.params['evaluation_upper_level_steps']
 
         # State machine vars to handle the time period of the upper level
         self.m_state = 0
@@ -229,7 +233,8 @@ class Agent:
         self.eta = self.params['eta']
         self.nu = self.params['nu']
         self.mu = self.params['mu']
-        self.zeta = self.params['zeta']        
+        self.zeta = self.params['zeta']
+        self.xi = self.params['xi']        
         
         self.memory = Memory(self.params['memory_capacity'], n_seed=self.params['seed'])
         if self.vNets_parallel:
@@ -281,8 +286,8 @@ class Agent:
         nS = int(event[3])
         d = event[5]
         T = int(event[6])
-        # P_S = event[7:7+self.n_m_states]
-        # P_nS = event[7+self.n_m_states:]
+        P_S = event[7:7+self.n_m_states]
+        P_nS = event[7+self.n_m_states:]
         
         # # Update value estimation
         # Q_nS = self.meta_critic[T, nS, :].copy()
@@ -304,37 +309,44 @@ class Agent:
         # Pi_S = expQ_S/Z_S
         # self.meta_actor[T, S, :] = Pi_S.copy() / Pi_S.sum()
 
+        # # Update value estimation
+        # Q_nS = self.meta_critic[T, nS, :]
+        # Pi_nS = self.meta_actor[T, nS, :]
+        # V_nS = (Pi_nS * (Q_nS - self.alpha_upper_level * np.log(Pi_nS+1e-20))).sum()
+        # self.meta_critic[T, S, A] += self.delta_upper_level * (R + self.gamma*(1-d)*V_nS - self.meta_critic[T, S, A])
+
         # Update value estimation
-        Q_nS = self.meta_critic[T, nS, :]
-        Pi_nS = self.meta_actor[T, nS, :]
-        V_nS = (Pi_nS * (Q_nS - self.alpha_upper_level * np.log(Pi_nS+1e-20))).sum()
-        self.meta_critic[T, S, A] = R + self.gamma*(1-d)*V_nS
+        Q_T = self.meta_critic[T, :, :]
+        Pi_T = self.meta_actor[T, :, :]
+        V_nS = ((Pi_T * (Q_T - self.alpha_upper_level * np.log(Pi_T + 1e-20))).sum(1) * P_nS).sum()
+        self.meta_critic[T, :, A] += self.delta_upper_level * (R + self.gamma*(1-d)*V_nS - self.meta_critic[T, :, A]) * P_S.copy()
         
         # Update policy
-        Q = self.meta_critic.copy()
-        Q = Q - Q.max(2, keepdims=True)
-        expQ = np.exp(Q/self.alpha_upper_level)
-        Z = expQ.sum(2, keepdims=True)
-        self.meta_actor = expQ/Z
+        if (self.bottom_level_epsds + 1) % self.evaluation_upper_level_steps == 0:            
+            Q = self.meta_critic.copy()
+            Q = Q - Q.max(2, keepdims=True)
+            expQ = np.exp(Q/self.alpha_upper_level)
+            Z = expQ.sum(2, keepdims=True)
+            self.meta_actor = expQ/Z
+
+        # # Update prior
+        # self.concept_model.update_prior(S, T)
+        # self.update_transition_model(S, A, nS, T)
+    
+    # def update_transition_model(self, S, A, nS, T):
+    #     self.transition_model[T,S,A,nS] += 1.0
+    #     self.transition_model[T,S,A,:] *= self.prior_n/(self.prior_n+1)
 
         # Update prior
-        self.concept_model.update_prior(S, T)
-        self.update_transition_model(S, A, nS, T)
+        self.concept_model.update_prior(S, T, P_S, self.model_update_method)
+        self.update_transition_model(S, A, nS, T, P_nS)
     
-    def update_transition_model(self, S, A, nS, T):
-        self.transition_model[T,S,A,nS] += 1.0
+    def update_transition_model(self, S, A, nS, T, P_nS):
+        if self.model_update_method == 'discrete':
+            self.transition_model[T,S,A,nS] += 1.0
+        else:
+            self.transition_model[T,S,A,:] += torch.FloatTensor(P_nS).to(device)
         self.transition_model[T,S,A,:] *= self.prior_n/(self.prior_n+1)
-
-    #     # Update prior
-    #     self.concept_model.update_prior(S, T, P_S, self.model_update_method)
-    #     self.update_transition_model(S, A, nS, T, P_nS)
-    
-    # def update_transition_model(self, S, A, nS, T, P_nS):
-    #     if self.model_update_method == 'discrete':
-    #         self.transition_model[T,S,A,nS] += 1.0
-    #     else:
-    #         self.transition_model[T,S,A,:] += torch.FloatTensor(P_nS).to(device)
-    #     self.transition_model[T,S,A,:] *= self.prior_n/(self.prior_n+1)
 
     def high_level_decision(self, task, S, explore):
         if (self.bottom_level_epsds % self.upper_level_period) == 0:
@@ -350,10 +362,10 @@ class Agent:
 
     def concept_inference(self, s, explore=False):
         if (self.bottom_level_epsds % self.upper_level_period) == 0:
-            # S, PS = self.concept_model.sample_m_state(torch.from_numpy(s).float().to(device), explore=explore)
-            S = self.concept_model.sample_m_state(torch.from_numpy(s).float().to(device), explore=explore)
+            S, PS = self.concept_model.sample_m_state(torch.from_numpy(s).float().to(device), explore=explore)
+            # S = self.concept_model.sample_m_state(torch.from_numpy(s).float().to(device), explore=explore)
             self.m_state = S
-            # self.posterior = PS.detach().cpu().numpy()
+            self.posterior = PS.detach().cpu().numpy()
         else:
             S = self.m_state
         return S 
@@ -395,85 +407,12 @@ class Agent:
         self.past_actions.append(action.copy())
         self.time_flow(done, task, completed_episode, r, state, action, action_llhoods)
 
-    # def time_flow(self, done, task, completed_episode, r, state, action, action_llhoods): 
-    #     to_learn_complete = self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0       
-    #     if to_learn_complete:
-    #         if self.hierarchical:
-    #             # learning_event = np.empty(7+2*self.n_m_states)
-    #             learning_event = np.empty(7)
-    #             learning_event[0] = self.past_m_state
-    #             learning_event[1] = self.past_m_action
-    #             learning_event[2] = self.cumulative_reward - r
-    #             learning_event[3] = self.m_state
-    #             learning_event[4] = self.m_action
-    #             learning_event[5] = float(done)
-    #             learning_event[6] = task
-    #             # learning_event[7:7+self.n_m_states] = self.past_posterior.copy()
-    #             # learning_event[7+self.n_m_states:] = self.posterior.copy()
-    #             self.meta_learning(learning_event.copy())
-
-    #         storing_event = np.empty(self.N_s_dim+self.upper_level_period*self.a_dim+self.n_m_actions+3)
-    #         for i in range(0, self.upper_level_period+1):
-    #             storing_event[i*self.s_dim:(i+1)*self.s_dim] = self.past_states[i].copy()
-    #             if i < self.upper_level_period:
-    #                 storing_event[self.N_s_dim + i*self.a_dim : self.N_s_dim + (i+1)*self.a_dim] = self.past_actions[i].copy()
-    #         storing_event[self.N_s_dim + self.upper_level_period*self.a_dim:-3] = self.action_llhoods - action_llhoods.copy()
-    #         storing_event[-3] = self.past_m_action
-    #         storing_event[-2] = task
-    #         storing_event[-1] = self.cumulative_reward - r
-    #         self.memorize_in_upper_level(storing_event)
-    #         # self.train_reward_model(task, self.past_states, self.cumulative_reward - r)
-    #         # self.train_evolution_model(task, self.past_states, state, self.past_m_action)
-
-    #         self.past_states = [state.copy()]
-    #         self.past_actions = [action.copy()]
-    #         self.action_llhoods = action_llhoods.copy()
-    #         self.cumulative_reward = r
-    #         self.stored = False
-    #         if self.upper_level_annealing:
-    #             self.alpha_upper_level = np.max([self.coefficient_upper_annealing * self.alpha_upper_level, self.min_alpha_upper_level])
-
-    #     if not self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0:
-    #         self.past_m_state = self.m_state
-    #         self.past_m_action = self.m_action
-    #         # self.past_posterior = self.posterior.copy()
-    #         # self.past_states = state.copy()
-    #         self.stored = True
-        
-    #     if done and not to_learn_complete and self.hierarchical:
-    #         # event = np.empty(7+2*self.n_m_states)
-    #         event = np.empty(7)
-    #         event[0] = self.m_state
-    #         event[1] = self.m_action
-    #         event[2] = self.cumulative_reward
-    #         event[3] = self.m_state
-    #         event[4] = self.m_action
-    #         event[5] = float(done)
-    #         event[6] = task
-    #         # event[7:7+self.n_m_states] = self.past_posterior.copy()
-    #         # PS = self.concept_model.sample_m_state(torch.from_numpy(state).float().to(device), explore=True)[1]
-    #         # event[7+self.n_m_states:] = PS.detach().cpu().numpy().copy()
-    #         self.meta_learning(event.copy())
-    #         # self.train_reward_model(task, self.past_states, self.cumulative_reward)
-    #         # self.train_evolution_model(task, self.past_states, state, self.m_action)     
-
-    #         # storing_event = np.empty(2*self.s_dim+3)
-    #         # storing_event[:self.s_dim] = self.past_states.copy()
-    #         # storing_event[self.s_dim:2*self.s_dim] = state.copy()
-    #         # storing_event[-3] = self.m_action
-    #         # storing_event[-2] = task
-    #         # storing_event[-1] = self.cumulative_reward
-    #         # self.memorize_in_upper_level(storing_event)               
-
-    #     self.bottom_level_epsds += 1
-
-    #     if done or completed_episode:
-    #         self.reset_upper_level() 
     def time_flow(self, done, task, completed_episode, r, state, action, action_llhoods): 
         to_learn_complete = self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0       
         if to_learn_complete:
             if self.hierarchical:
-                learning_event = np.empty(7)
+                # learning_event = np.empty(7)
+                learning_event = np.empty(7+2*self.n_m_states)
                 learning_event[0] = self.past_m_state
                 learning_event[1] = self.past_m_action
                 learning_event[2] = self.cumulative_reward - r
@@ -481,6 +420,8 @@ class Agent:
                 learning_event[4] = self.m_action
                 learning_event[5] = float(done)
                 learning_event[6] = task
+                learning_event[7:7+self.n_m_states] = self.past_posterior.copy()
+                learning_event[7+self.n_m_states:] = self.posterior.copy()
                 self.meta_learning(learning_event.copy())
 
             storing_event = np.empty(self.N_s_dim+self.upper_level_period*self.a_dim+self.n_m_actions+3)
@@ -506,11 +447,13 @@ class Agent:
         if not self.stored and (self.bottom_level_epsds % self.upper_level_period) == 0:
             self.past_m_state = self.m_state
             self.past_m_action = self.m_action
+            self.past_posterior = self.posterior.copy()
             # self.past_states = state.copy()
             self.stored = True
         
         if done and not to_learn_complete and self.hierarchical:
-            event = np.empty(7)
+            # event = np.empty(7)
+            event = np.empty(7+2*self.n_m_states)
             event[0] = self.m_state
             event[1] = self.m_action
             event[2] = self.cumulative_reward
@@ -518,6 +461,9 @@ class Agent:
             event[4] = self.m_action
             event[5] = float(done)
             event[6] = task
+            event[7:7+self.n_m_states] = self.past_posterior.copy()
+            PS = self.concept_model.sample_m_state(torch.from_numpy(state).float().to(device), explore=True)[1]
+            event[7+self.n_m_states:] = PS.detach().cpu().numpy().copy()
             self.meta_learning(event.copy())
 
         self.bottom_level_epsds += 1
@@ -567,47 +513,65 @@ class Agent:
 
             # Optimize v network
             if self.hierarchical:
-                S_batch_off, posterior_off = self.concept_model.sample_m_state_and_posterior(s_batch)[0:2]                
-                if self.multitask:  
-                    policy = torch.from_numpy(self.meta_actor)[T_batch,:,:].float().to(device)
-                    policy_off = self.meta_actor[T_batch.astype(int),S_batch_off.numpy(),:]
-                    assert len(policy_off.shape) == 2, 'Wrong size'
-                    assert policy_off.shape[0] == S_batch_off.size(0), 'Wrong size'
-                    assert policy_off.shape[1] == self.n_m_actions, 'Wrong size'
-                    A_batch_off = torch.from_numpy(vectorized_multinomial(policy_off)).long().to(device)                           
-                    _, a_batch_off, a_conditional_llhood_off = self.actor.sample_action_and_llhood_pairs(s_batch[:,:self.s_dim], A_batch_off)
-                    A_probability_off =  torch.einsum('ijk,ij->ik', policy, posterior_off)                                    
-                else:
-                    A_batch_off = S_batch_off.clone()
-                    _, a_batch_off, a_conditional_llhood_off = self.actor.sample_action_and_llhood_pairs(s_batch[:,:self.s_dim], A_batch_off)
-                    A_probability_off = posterior_off.detach() 
-                a_log_posterior_unnormalized = a_conditional_llhood_off + torch.log(A_probability_off + 1e-12)
-                a_llhood_off = torch.logsumexp(a_log_posterior_unnormalized+1e-12, dim=1, keepdim=True)
+                posterior_off = self.concept_model.sample_m_state_and_posterior(s_batch)[1]
+
+                a_batch_A, llhood_a_A = self.actor.sample_actions_and_llhoods_for_all_skills(s_batch)
+                a_batch_A = a_batch_A.view(-1, self.a_dim)
+                s_batch_repeated = s_batch.view(s_batch.size(0),1,self.s_dim).repeat(1,self.n_m_actions,1).view(-1,self.s_dim)
+
+                q1_A = self.critic1(s_batch_repeated.detach(), a_batch_A)
+                q2_A = self.critic2(s_batch_repeated.detach(), a_batch_A)
+                q_A = torch.min(torch.stack([q1_A, q2_A]), 0)[0]
+                q_A = q_A.view(-1, self.n_m_actions, self.n_tasks)
+
+                PA_ST = torch.from_numpy(self.meta_actor).float().to(device)
+                PA_sT = torch.einsum('hjk,ij->ikh', PA_ST, posterior_off.detach())
+
+                llhood_a_T = torch.logsumexp(llhood_a_A.unsqueeze(3) + torch.log(PA_sT + 1e-12).unsqueeze(2), dim=1)
+                H_a_sA = -llhood_a_A[:, np.arange(self.n_m_actions), np.arange(self.n_m_actions)].unsqueeze(2)
+
+                quasi_v = q_A - self.alpha * llhood_a_T - self.mu * H_a_sA
+                v_approx = torch.einsum('ikh,ikh->ih', PA_sT, quasi_v)  
+
+                if not only_metrics:
+                    v = self.baseline(s_batch)
+                    
+                # if self.multitask:  
+                #     policy = torch.from_numpy(self.meta_actor)[T_batch,:,:].float().to(device)
+                #     policy_off = self.meta_actor[T_batch.astype(int),S_batch_off.numpy(),:]
+                #     assert len(policy_off.shape) == 2, 'Wrong size'
+                #     assert policy_off.shape[0] == S_batch_off.size(0), 'Wrong size'
+                #     assert policy_off.shape[1] == self.n_m_actions, 'Wrong size'
+                #     A_batch_off = torch.from_numpy(vectorized_multinomial(policy_off)).long().to(device)                           
+                #     _, a_batch_off, a_conditional_llhood_off = self.actor.sample_action_and_llhood_pairs(s_batch[:,:self.s_dim], A_batch_off)
+                #     A_probability_off =  torch.einsum('ijk,ij->ik', policy, posterior_off)                                    
+                # else:
+                #     A_batch_off = S_batch_off.clone()
+                #     _, a_batch_off, a_conditional_llhood_off = self.actor.sample_action_and_llhood_pairs(s_batch[:,:self.s_dim], A_batch_off)
+                #     A_probability_off = posterior_off.detach() 
+                # a_log_posterior_unnormalized = a_conditional_llhood_off + torch.log(A_probability_off + 1e-12)
+                # a_llhood_off = torch.logsumexp(a_log_posterior_unnormalized+1e-12, dim=1, keepdim=True)
             else:
                 A_batch_off = torch.zeros(s_batch.size(0),).long().to(device)
-                A_probability_off = torch.ones(s_batch.size(0),).long().to(device)
+                PA_sT = torch.ones(s_batch.size(0),).long().to(device)
                 _, a_batch_off, a_conditional_llhood_off = self.actor.sample_action_and_llhood_pairs(s_batch[:,:self.s_dim], A_batch_off)
-                a_llhood_off =  a_conditional_llhood_off
+                llhood_a_T =  a_conditional_llhood_off
+                H_a_sA = -a_conditional_llhood_off[np.arange(s_batch.size(0)), A_batch_off].view(-1,1)
 
-            if not only_metrics:
-                q1_off = self.critic1(s_batch.detach(), a_batch_off)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
-                q2_off = self.critic2(s_batch.detach(), a_batch_off)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
-                q_off = torch.min(q1_off, q2_off)
-                assert q_off.size(1) == 1, 'Wrong size'
-            
-                v = self.baseline(s_batch)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
-                assert v.size(1) == 1, 'Wrong size'
-                v_approx = q_off - self.alpha*a_llhood_off
-                assert a_llhood_off.size(1) == 1, 'Wrong size'
-                assert v_approx.size(1) == 1, 'Wrong size'       
-
-            if self.hierarchical:
-                a_conditional_A_entropy = -a_conditional_llhood_off[np.arange(s_batch.size(0)), A_batch_off].view(-1,1)
-                if not only_metrics:        
-                    v_approx = v_approx - self.mu*a_conditional_A_entropy
+                if not only_metrics:
+                    q1_off = self.critic1(s_batch.detach(), a_batch_off)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
+                    q2_off = self.critic2(s_batch.detach(), a_batch_off)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
+                    q_off = torch.min(q1_off, q2_off)
+                    assert q_off.size(1) == 1, 'Wrong size'
+                
+                    v = self.baseline(s_batch)[np.arange(s_batch.size(0)), T_batch].view(-1,1)
+                    assert v.size(1) == 1, 'Wrong size'
+                    v_approx = q_off - self.alpha*llhood_a_T
+                    assert llhood_a_T.size(1) == 1, 'Wrong size'
+                    assert v_approx.size(1) == 1, 'Wrong size'   
                 
             if not only_metrics:
-                v_loss = self.baseline.loss_func(v, v_approx.detach())
+                v_loss = ((v - v_approx.detach())**2).sum(1).mean()
                 self.baseline.optimizer.zero_grad()
                 v_loss.backward()
                 clip_grad_norm_(self.baseline.parameters(), self.clip_value)
@@ -622,16 +586,16 @@ class Agent:
                 self.actor.optimizer.step()
 
         else:
-            a_llhood_off = torch.zeros(1).to(device)  
-            a_conditional_A_entropy = torch.zeros(1).to(device)
-            A_probability_off = torch.ones(1,1).to(device)/self.n_m_actions
+            llhood_a_T = torch.zeros(1).to(device)  
+            H_a_sA = torch.zeros(1).to(device)
+            PA_sT = torch.ones(1,1).to(device)/self.n_m_actions
 
         if only_metrics:
-            marginal_A = A_probability_off.mean(0, keepdim=True) 
+            marginal_A = PA_sT.mean(0, keepdim=True) 
             metrics = {
-                'H(a|s)': a_llhood_off.mean().detach().cpu().numpy(),
-                'H(a|A,s)': a_conditional_A_entropy.mean().detach().cpu().numpy(),
-                'H(A|s)': -(A_probability_off * torch.log(A_probability_off + 1e-12)).sum(1, keepdim=True).mean().detach().cpu().numpy(),
+                'H(a|s)': llhood_a_T.mean().detach().cpu().numpy(),
+                'H(a|A,s)': H_a_sA.mean().detach().cpu().numpy(),
+                'H(A|s)': -(PA_sT * torch.log(PA_sT + 1e-12)).sum(1, keepdim=True).mean().detach().cpu().numpy(),
                 'H(A)': -(marginal_A * torch.log(marginal_A + 1e-12)).sum().detach().cpu().numpy()
             }
             
@@ -683,9 +647,16 @@ class Agent:
                     a_upper_batches.append(torch.FloatTensor(upper_batch[:, self.N_s_dim + i*self.a_dim : self.N_s_dim + (i+1)*self.a_dim]).to(device))
                     a_llhoods_upper_batch_off += self.actor.llhoods(s_upper_batches[-1], a_upper_batches[-1])
 
+
+            # upper_batch_2 = self.upper_memory.sample(self.concept_batch_size)
+            # s2_upper_batch = torch.FloatTensor(np.array(upper_batch_2)[:, 0: self.s_dim]).to(device)
+
+            del upper_batch
+            # del upper_batch_2
+
             baseline = np.log(batch_size)
             
-            # I(s:S)
+            # I(s_t:S_t)
             _, S_upper_posterior, S_upper_log_posterior = self.concept_model.sample_m_state_and_posterior(s_upper_batches[0])
             S_upper_log_marginal = -baseline + torch.logsumexp(S_upper_log_posterior, dim=0).view(-1,1)
             S_entropy = -(torch.exp(S_upper_log_marginal)*S_upper_log_marginal).sum()
@@ -702,6 +673,7 @@ class Agent:
                 clip_grad_norm_(self.reward_model.parameters(), self.clip_value)
                 self.reward_model.optimizer.step()
 
+            # I(R_t:S_t|T_t)
             R_lklhood_given_sApT_A = torch.exp(self.reward_model.sample_and_cross_llhood(s_upper_batches[0], T_upper_batch))
             assert len(R_lklhood_given_sApT_A.shape) == 4, 'P(R|s,A,T) is calculated incorrectly. Wrong size.'
             assert R_lklhood_given_sApT_A.size(0) == batch_size, 'P(R|s,A,T) is calculated incorrectly. Wrong dim 0.'
@@ -725,6 +697,7 @@ class Agent:
             R_conditional_entropy_on_T = -(policy_upper * S_upper_posterior.unsqueeze(2) * torch.log(R_lklhood_given_T_A + 1e-10)).sum((1,2)).view(-1,1)  
             R_S_mutual_information = R_conditional_entropy_on_T - R_conditional_entropy_on_ST          
             
+            # I(S_t+1:S_t|A_t,T_t)
             transition_task_mask = torch.zeros(batch_size, self.n_tasks).float().to(device)
             transition_task_mask[np.arange(batch_size), T_upper_batch] = torch.ones(batch_size).float().to(device)
             task_counts = transition_task_mask.sum(0).view(-1,1,1,1).clamp(1,batch_size)
@@ -740,6 +713,7 @@ class Agent:
             nS_conditional_entropy_on_AT = -(nSSAT_lklhood * torch.log(nS_lklhood_given_AT+1e-10)).sum()
             nS_S_mutual_information = nS_conditional_entropy_on_AT - nS_conditional_entropy_on_SAT
 
+            # Inconsitency metric
             S_upper_posteriors = [(S_upper_posterior, S_upper_log_posterior)]
             posterior_inconsistency = torch.zeros_like(S_upper_posterior)
             for s_batch in s_upper_batches[1:]:
@@ -754,11 +728,26 @@ class Agent:
             else:
                 inconsistency_metric = self.zeta * posterior_inconsistency.sum(1, keepdim=True)
 
+            # Action divergence
+            # S2_upper_posterior = self.concept_model.sample_m_state_and_posterior(s2_upper_batch)[1]
+            point_distributions = self.estimate_macro_policies(s_upper_batches[0]).detach()
+            # point_distribution_2 = self.estimate_macro_policies(s2_upper_batch).detach()
+            
+            action_KL_divergence = (point_distributions.unsqueeze(1) * (torch.log(point_distributions.unsqueeze(1) + 1e-12) - torch.log(point_distributions.unsqueeze(0) + 1e-12))).sum(2)
+            action_KL_divergence *= task_mask
+            # KL_divergence_2 = (point_distribution_2.unsqueeze(1) * (torch.log(point_distribution_2.unsqueeze(1) + 1e-12) - torch.log(point_distribution_1.unsqueeze(2) + 1e-12))).sum(1, keepdim=True)
+            # JS_divergence = 0.5*(KL_divergence_1 + KL_divergence_2)
+
+            # macro_state_correlation = (S_upper_posterior * S2_upper_posterior / (S_probability_given_T + 1e-10)).sum(1, keepdim=True)
+            # action_divergence_metric = self.xi * macro_state_correlation * JS_divergence
+            macro_state_correlation = ((S_upper_posterior / (S_probability_given_T + 1e-10)).unsqueeze(1) * S_upper_posterior.unsqueeze(0)).sum(2, keepdim=True)
+            action_divergence_metric = self.xi * (0.5 * macro_state_correlation * action_KL_divergence).mean(1, keepdim=True)
+
             if not only_metrics:
                 disentanglement_metric = self.beta*s_S_mutual_information + self.eta*R_S_mutual_information + self.nu*nS_S_mutual_information
             
                 # Optimize concept networks              
-                concept_model_loss = (inconsistency_metric-disentanglement_metric).mean()
+                concept_model_loss = (action_divergence_metric + inconsistency_metric - disentanglement_metric).mean()
                 self.concept_model.optimizer.zero_grad()
                 concept_model_loss.backward()
                 clip_grad_norm_(self.concept_model.parameters(), self.clip_value)
@@ -792,6 +781,17 @@ class Agent:
             }
             
             return metrics
+
+    def estimate_macro_policies(self, s):
+        with torch.no_grad():
+            a = self.actor.calculate_mean(s).view(-1, self.a_dim)
+            s_repeated = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1).view(-1,self.s_dim)
+            
+            q = (0.5*(self.critic1(s_repeated, a) + self.critic2(s_repeated, a))).view(-1, self.n_m_actions)
+            exp_q = torch.exp(q - q.max(1, keepdim=True)[0])
+            Pi = exp_q / exp_q.sum(1, keepdim=True)
+            
+        return Pi
 
     def estimate_metrics(self):
         with torch.no_grad():
@@ -1000,8 +1000,9 @@ class System:
                 state = self.envs[self.task]._get_obs()[:28]
         return state
 
-    # def initialization(self, epsd_steps): 
-    def initialization(self):         
+     
+    # def initialization(self):
+    def initialization(self, epsd_steps):         
         self.reset()
         self.epsd_counter += 1
         average_r = 0.0
@@ -1014,8 +1015,8 @@ class System:
             average_r += (r-average_r)/(init_step+1)
             if done:
                 epsd_step = 0
-            # elif (init_step+1) % (10*epsd_steps) == 0:
-            #     self.reset(change_env=True)
+            elif (init_step+1) % (10*epsd_steps) == 0:
+                self.reset(change_env=True)
             if self.render:
                 self.envs[self.task].render()                        
         print("Finished initialization, av. reward = %.4f" % (average_r))
@@ -1025,7 +1026,7 @@ class System:
         state = self.get_obs()
         action, action_llhood = self.agent.act(state, self.task, explore=True)
         scaled_action = scale_action(action, self.min_action, self.max_action).reshape(-1)
-        _, reward, done, info = self.envs[self.task].step(scaled_action)  
+        reward, done = self.envs[self.task].step(scaled_action)[1:3]  
         done = done and self.reset_when_done
         next_state = self.get_obs()
         if done:
@@ -1044,7 +1045,7 @@ class System:
             event[self.sarsd_dim] = reward
         
         # if self.hierarchical:
-        self.agent.update_upper_level(event[self.sarsd_dim], done, self.task, epsd_step>=self.envs[self.task]._max_episode_steps, state, action, action_llhood)    
+        #   self.agent.update_upper_level(event[self.sarsd_dim], done, self.task, epsd_step>=self.envs[self.task]._max_episode_steps, state, action, action_llhood)    
         
         self.agent.memorize(event)   
         return event
@@ -1097,8 +1098,8 @@ class System:
             self.envs[self.task].render()
 
         if initialization:
-            self.initialization()
-            # self.initialization(epsd_steps)
+            # self.initialization()
+            self.initialization(epsd_steps)
 
         n_done = 0
         # rewards = []
