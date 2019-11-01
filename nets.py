@@ -395,7 +395,7 @@ class parallel_Linear(nn.Module):
         nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input):
-        return torch.einsum('ijk,jlk->ijl', input, self.weight) + self.bias 
+        return torch.einsum('ijk,jlk->ijl', input, self.weight) + self.bias.unsqueeze(0) 
 
     def single_output(self, input, label):
         weight = self.weight.data[label,:,:].view(self.out_features, self.in_features)
@@ -425,7 +425,7 @@ class parallel_Linear_simple(nn.Module):
         nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input):
-        return torch.einsum('ik,jlk->ijl', input, self.weight) + self.bias 
+        return torch.einsum('ik,jlk->ijl', input, self.weight) + self.bias.unsqueeze(0) 
 
     def single_output(self, input, label):
         weight = self.weight.data[label,:,:].view(self.out_features, self.in_features)
@@ -458,7 +458,7 @@ class v_parallel_valueNet(nn.Module):
     def forward(self, s):
         x = F.relu(self.l1(s))
         x = F.relu(self.l2(x))
-        x = self.l3(x)
+        x = self.l3(x).squeeze(2)
         return(x)
 
 class q_parallel_valueNet(nn.Module):
@@ -482,7 +482,7 @@ class q_parallel_valueNet(nn.Module):
         x = torch.cat([s, a], 1)
         x = F.relu(self.l1(x))
         x = F.relu(self.l2(x))
-        x = self.l3(x)
+        x = self.l3(x).squeeze(2)
         return(x)
 
 class mixtureConceptModel(nn.Module):
@@ -713,7 +713,7 @@ class encoderConceptModel(nn.Module):
             S = Categorical(logits=log_posterior).sample().item()
         else:
             S = log_posterior.argmax().item()
-        return S
+        return S, torch.exp(log_posterior)
     
     def sample_m_state_and_posterior(self, s, explore=True):
         llhoods = self(s)[0] + torch.log(self.prior.mean(0)/self.prior_n+1e-20).view(1,-1)
@@ -725,15 +725,16 @@ class encoderConceptModel(nn.Module):
             S = log_posterior.argmax(1).cpu()        
         return S, torch.exp(log_posterior), log_posterior
     
-    # def update_prior(self, S, T, P_S, method):
-    #     if method == 'discrete':
-    #         self.prior[T,S] += 1.0
-    #     else:
-    #         self.prior[T,:] += torch.FloatTensor(P_S).to(device)
-    #     self.prior[T,:] *= self.prior_n/(self.prior_n+1)
-    def update_prior(self, S, T):
-        self.prior[T,S] += 1.0
+    def update_prior(self, S, T, P_S, method):
+        if method == 'discrete':
+            self.prior[T,S] += 1.0
+        else:
+            self.prior[T,:] += torch.FloatTensor(P_S).to(device)
         self.prior[T,:] *= self.prior_n/(self.prior_n+1)
+
+    # def update_prior(self, S, T):
+    #     self.prior[T,S] += 1
+    #     self.prior[T,:] *= self.prior_n/(self.prior_n+1)
 
 class policyNet(nn.Module):
     def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, lr=3e-4, hidden_dim=256, 
@@ -791,6 +792,18 @@ class policyNet(nn.Module):
         assert torch.all(a==a), 'Invalid constrained action - sample'      
           
         return a
+
+    def calculate_mean(self, s):
+        s = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1)
+        
+        if self.latent_dim > 0:
+            t = torch.randn(s.size(0), 1, self.latent_dim).repeat(1,self.n_m_actions,1).float().cuda()
+            s = torch.cat([s,t], 2)
+        x = F.relu(self.l1(s))
+        x = F.relu(self.l2(x))
+        m = self.l31(x).clone()
+
+        return m
     
     def sample_action_and_llhood_pairs(self, s, A, explore=True):
         s = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1)
@@ -862,6 +875,33 @@ class policyNet(nn.Module):
         u = m + stdev*torch.randn_like(m)
         a = torch.tanh(u)
         return a
+    
+    def sample_actions_and_llhoods_for_all_skills(self, s, explore=True):
+        s = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1)
+        m, log_stdev = self(s)
+        stdev = log_stdev.exp()
+        if explore:
+            u = m + stdev*torch.randn_like(m)
+        else:
+            u = m
+        a = torch.tanh(u)
+
+        # u_repeated = selected_u.view(s.size(0),1,self.a_dim).repeat(1,self.n_m_actions,1)
+        # a_repeated = selected_a.view(s.size(0),1,self.a_dim).repeat(1,self.n_m_actions,1)
+        
+        if self.log_func == 'self':
+            llhoods = gaussian_likelihood(u.unsqueeze(1), m.unsqueeze(2), log_stdev.unsqueeze(2), self.EPS_sigma)
+        elif self.log_func == 'torch':
+            llhoods = Normal(m.unsqueeze(2), stdev.unsqueeze(2)).log_prob(u.unsqueeze(1))
+
+        if self.log_lim_method == 'clamp':
+            llhoods -= torch.log(torch.clamp(1 - a.unsqueeze(1).pow(2), self.EPS_log_1_min_a2, 1.0))    
+        elif self.log_lim_method == 'sum':
+            llhoods -= torch.log(1 - a.unsqueeze(1).pow(2) + self.EPS_log_1_min_a2)
+
+        llhoods = llhoods.sum(3)   
+
+        return a, llhoods
 
     def forward(self, s):
         if self.latent_dim > 0:
