@@ -164,9 +164,9 @@ class conceptLossNet(nn.Module):
         self.optimizer = optim.Adam(self.parameters(), lr=lr)    
     
     def forward(self, s, posterior):
-        s = F.relu(self.l11(s))
+        x = F.relu(self.l11(s))
         posterior = F.relu(self.l12(posterior))
-        x = torch.cat([s, posterior], 1)
+        x = torch.cat([x, posterior], 1)
         x = F.relu(self.l2(x))
         x = self.l3(x)
         return(x)
@@ -231,7 +231,7 @@ class rNet(nn.Module):
 
         return cross_llhood
     
-    def llhood(self, r, s, T):
+    def llhood(self, r, s, T, cross=False):
         m, log_stdev = self(s)        
         # z = torch.zeros(s.size(0),1).to(device)
         # o = torch.ones(s.size(0),1).to(device)
@@ -240,16 +240,26 @@ class rNet(nn.Module):
 
         if self.log_func == 'self':
             log_stdev = log_stdev[np.arange(s.size(0)), T, :]
-            llhood = gaussian_likelihood(r, m, log_stdev, self.EPS_sigma)
+            if not cross:
+                llhood = gaussian_likelihood(r, m, log_stdev, self.EPS_sigma)
+            else:
+                llhood = gaussian_likelihood(r.unsqueeze(0).unsqueeze(2), m.unsqueeze(1).unsqueeze(3), log_stdev.unsqueeze(1).unsqueeze(3), self.EPS_sigma)
         elif self.log_func == 'torch':
             stdev = torch.exp(log_stdev)[np.arange(s.size(0)), T, :]
-            llhood = Normal(m, stdev).log_prob(r.view(-1,1))
+            if not cross:
+                llhood = Normal(m, stdev).log_prob(r)
+            else:
+                llhood = Normal(m.unsqueeze(1).unsqueeze(3), stdev.unsqueeze(1).unsqueeze(3)).log_prob(r.unsqueeze(0).unsqueeze(2))
 
         # log_unnormalized_posterior = llhood + 0.2*Normal(o, 0.2*o).log_prob(stdev)
 
         assert torch.all(llhood==llhood), 'Invalid memb llhoods'
-        assert len(llhood.shape) == 2, 'Wrong size'
-        assert llhood.size(1) == self.n_m_actions, 'Wrong size'
+        if not cross:
+            assert len(llhood.shape) == 2, 'Wrong size'
+            assert llhood.size(1) == self.n_m_actions, 'Wrong size'
+        else:
+            assert len(llhood.shape) == 4, 'Wrong size'
+            assert llhood.size(2) == self.n_m_actions, 'Wrong size'        
         # assert llhood.size(1) == 1, 'Wrong size'
         # return log_unnormalized_posterior
         return llhood
@@ -283,6 +293,35 @@ class rNet(nn.Module):
 
     #     return llhood, cross_llhood, m, log_stdev
 
+class rewardNet(nn.Module):
+    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, init_method='glorot'):
+        super().__init__()      
+        self.log_func = 'torch'
+        self.std_lim_method = 'clamp'
+        self.n_tasks = n_tasks
+        
+        self.l1 = nn.Linear(s_dim+a_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, n_tasks)
+                
+        self.init_method = init_method
+        if self.init_method == 'uniform':
+            self.l3.weight.data.uniform_(-3e-3, 3e-3)
+            self.l3.bias.data.uniform_(-3e-3, 3e-3)
+        elif self.init_method == 'glorot':
+            self.apply(weights_init_) 
+
+
+        self.loss_func = nn.MSELoss()
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)    
+    
+    def forward(self, s, a):
+        x = torch.cat([s,a], 1)
+        x = F.relu(self.l1(x))
+        x = F.relu(self.l2(x))
+        x = self.l3(x)
+        return x    
+    
 class RNet(nn.Module):
     def __init__(self, n_m_states, n_tasks=1, lr=3e-4, latent_dim=10, hidden_dim=256, init_method='glorot'):
         super().__init__()      
@@ -573,7 +612,11 @@ class mixtureConceptModel(nn.Module):
         if explore:
             S = Categorical(logits=log_posterior).sample().item()
         else:
-            S = log_posterior.argmax().item()
+            posterior = torch.exp(log_posterior)
+            tie_breaking_dist = torch.isclose(posterior, posterior.max()).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().item()
+            # S = log_posterior.argmax().item()
         return S
     
     def sample(self, batch_size):
@@ -586,11 +629,15 @@ class mixtureConceptModel(nn.Module):
         llhoods = self.llhood(s)
         lmmbrship = torch.logsumexp(llhoods, 1, keepdim=True)        
         log_posterior = (llhoods-lmmbrship)
+        posterior = torch.exp(log_posterior)
         if explore:
             S = Categorical(logits=log_posterior).sample().cpu()
-        else:
-            S = log_posterior.argmax(1).cpu()        
-        return S, torch.exp(log_posterior)
+        else:            
+            tie_breaking_dist = torch.isclose(posterior, posterior.max(1, keepdim=True)[0]).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().cpu()
+            # S = log_posterior.argmax(1).cpu()        
+        return S, posterior
     
     # def posterior(self, s):
     #     llhoods = self.llhood(s)
@@ -709,27 +756,35 @@ class encoderConceptModel(nn.Module):
         llhoods = self(s.view(1,-1))[0].view(-1) + torch.log(self.prior.mean(0)/self.prior_n+1e-12)
         lmmbrship = torch.logsumexp(llhoods,0)
         log_posterior = (llhoods-lmmbrship)
+        posterior = torch.exp(log_posterior)
         if explore:
             S = Categorical(logits=log_posterior).sample().item()
-        else:
-            S = log_posterior.argmax().item()
-        return S, torch.exp(log_posterior)
+        else:            
+            tie_breaking_dist = torch.isclose(posterior, posterior.max()).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().item()
+            # S = log_posterior.argmax().item()
+        return S, posterior
     
     def sample_m_state_and_posterior(self, s, explore=True):
         llhoods = self(s)[0] + torch.log(self.prior.mean(0)/self.prior_n+1e-20).view(1,-1)
         lmmbrship = torch.logsumexp(llhoods, 1, keepdim=True)        
         log_posterior = (llhoods-lmmbrship)
+        posterior = torch.exp(log_posterior)
         if explore:
             S = Categorical(logits=log_posterior).sample().cpu()
-        else:
-            S = log_posterior.argmax(1).cpu()        
-        return S, torch.exp(log_posterior), log_posterior
+        else:            
+            tie_breaking_dist = torch.isclose(posterior, posterior.max(1, keepdim=True)[0]).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().cpu()
+            # S = log_posterior.argmax(1).cpu()        
+        return S, posterior, log_posterior
     
     def update_prior(self, S, T, P_S, method):
         if method == 'discrete':
             self.prior[T,S] += 1.0
         else:
-            self.prior[T,:] += torch.FloatTensor(P_S).to(device)
+            self.prior[T,:] += torch.FloatTensor(P_S.reshape(-1)).to(device).clone()
         self.prior[T,:] *= self.prior_n/(self.prior_n+1)
 
     # def update_prior(self, S, T):
@@ -752,8 +807,10 @@ class policyNet(nn.Module):
         self.log_lim_method = 'sum' # 'sum' or 'clamp'
         self.log_func = 'torch' # 'torch' or 'self'
 
-        self.l1 = parallel_Linear(n_m_actions, input_dim + self.latent_dim, hidden_dim)
-        self.l2 = parallel_Linear(n_m_actions, hidden_dim, hidden_dim)
+        self.l11 = parallel_Linear(n_m_actions, input_dim + self.latent_dim, hidden_dim)
+        # self.l12 = parallel_Linear(n_m_actions, input_dim + self.latent_dim, hidden_dim)
+        self.l21 = parallel_Linear(n_m_actions, hidden_dim, hidden_dim)
+        # self.l22 = parallel_Linear(n_m_actions, hidden_dim, hidden_dim)
         self.l31 = parallel_Linear(n_m_actions, hidden_dim, output_dim)
         self.l32 = parallel_Linear(n_m_actions, hidden_dim, output_dim)
 
@@ -767,15 +824,21 @@ class policyNet(nn.Module):
             self.apply(weights_init_) 
 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
+
+        # self.parameters_mean = list(self.l11.parameters()) + list(self.l21.parameters()) + list(self.l31.parameters())
+        # self.optimizer_mean = optim.Adam(self.parameters_mean, lr=lr)
     
     def single_forward(self, s, A):
         if self.latent_dim > 0:
             t = torch.randn(1, self.latent_dim).float().cuda()
             s = torch.cat([s,t], 1)
-        x = F.relu(self.l1.single_output(s, A))
-        x = F.relu(self.l2.single_output(x, A))
-        m = self.l31.single_output(x, A)
-        log_stdev = self.l32.single_output(x, A)
+        x1 = F.relu(self.l11.single_output(s, A))
+        # x2 = F.relu(self.l12.single_output(s, A))
+        x1 = F.relu(self.l21.single_output(x1, A))
+        # x2 = F.relu(self.l22.single_output(x2, A))
+        m = self.l31.single_output(x1, A)
+        # log_stdev = self.l32.single_output(x2, A)
+        log_stdev = self.l32.single_output(x1, A)
         log_stdev = torch.clamp(log_stdev, self.min_log_stdev, self.max_log_stdev)
         return m, log_stdev
     
@@ -794,15 +857,13 @@ class policyNet(nn.Module):
         return a
 
     def calculate_mean(self, s):
-        s = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1)
-        
+        x = s.view(s.size(0),1,s.size(1)).repeat(1,self.n_m_actions,1)
         if self.latent_dim > 0:
-            t = torch.randn(s.size(0), 1, self.latent_dim).repeat(1,self.n_m_actions,1).float().cuda()
-            s = torch.cat([s,t], 2)
-        x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
+            t = torch.randn(x.size(0), 1, self.latent_dim).repeat(1,self.n_m_actions,1).float().cuda()
+            x = torch.cat([x,t], 2)
+        x = F.relu(self.l11(x))
+        x = F.relu(self.l21(x))
         m = self.l31(x).clone()
-
         return m
     
     def sample_action_and_llhood_pairs(self, s, A, explore=True):
@@ -904,13 +965,17 @@ class policyNet(nn.Module):
         return a, llhoods
 
     def forward(self, s):
+        x = s.clone()
         if self.latent_dim > 0:
             t = torch.randn(s.size(0), 1, self.latent_dim).repeat(1,self.n_m_actions,1).float().cuda()
-            s = torch.cat([s,t], 2)
-        x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
-        m = self.l31(x)
-        log_stdev = self.l32(x)
+            x = torch.cat([s,t], 2)
+        x1 = F.relu(self.l11(x))
+        # x2 = F.relu(self.l12(s))
+        x1 = F.relu(self.l21(x1))
+        # x2 = F.relu(self.l22(x2))
+        m = self.l31(x1)
+        # log_stdev = self.l32(x2)
+        log_stdev = self.l32(x1)
         if self.std_lim_method == 'squash':
             log_stdev = 0.5 * (torch.tanh(log_stdev) + 1) * (self.max_log_stdev - self.min_log_stdev) + self.min_log_stdev
         elif self.std_lim_method == 'clamp':
