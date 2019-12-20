@@ -7,23 +7,35 @@ import torch.optim as optim
 def exists_folder(f_name):
     return os.path.isdir(f_name)
 
-n_test = 131
-last_iter = 39
+n_test = 134
+last_iter = 0
 tr_epsds = 4000
 
 modify_memory = False
 new_memory_limit = 400000
-upper_level_period = 3
+upper_level_period = 5
 load_upper_memory = True
 
+# env_names = [   
+#             'AntGatherRewards-v3', 
+#             'AntGatherBombs-v3'
+#             ]
 env_names = [   
             'AntStraightLine-v3',
             'AntSquareTrack-v3',
             'AntRotate-v3',
-            'AntRotateReward-v3',
-            'AntSquareTrackBomb-v3', 
-            'AntSquareTrackReward-v3'
+            'AntRotateClock-v3',
+            'AntGatherRewards-v3', 
+            'AntGatherBombs-v3'
             ]
+# env_names = [   
+#             'AntStraightLine-v3',
+#             'AntSquareTrack-v3',
+#             'AntRotate-v3',
+#             'AntRotateReward-v3',
+#             'AntSquareTrackBomb-v3', 
+#             'AntSquareTrackReward-v3'
+#             ]
 # env_names = [
 #             'AntLeft-v3',
 #             'AntRight-v3'
@@ -33,7 +45,7 @@ env_names = [
 
 # folder_name = 'HopperTest'
 # folder_name = 'AntLeftRight_v2'
-folder_name = 'AntDRIM_v3'
+folder_name = 'AntDRIM_v5'
 # folder_name = 'AntSquareTrackTest'
 
 common_path = folder_name + '/' + str(n_test)
@@ -81,7 +93,7 @@ if last_iter > 0:
 if not started:
     reward_scale = 10 #10 for (weird?) ant
     batch_size = 256
-    n_m_states = 8
+    n_m_states = 10
     env_steps = 1
     seed = 1000
     params = {
@@ -99,23 +111,25 @@ if not started:
     agent_params = {
                     'n_tasks': len(env_names), 
                     'hierarchical': True,
-                    'n_m_actions': 8, 
+                    'n_m_actions': 4, 
                     'n_m_states': n_m_states,
                     'upper_level_period': upper_level_period,
                     'skill_steps': 9,
                     'p_lr': 3e-4,                                        
-                    'alpha': 0.5/reward_scale * np.ones(len(env_names)),
-                    'mu': 1.0/reward_scale * np.ones(len(env_names)),
-                    'beta': 1/reward_scale,
-                    'eta': 20/reward_scale,
-                    'nu': 10/reward_scale,
-                    'zeta': 0.25/reward_scale,
-                    'xi': 0.25/reward_scale,
-                    'alpha_upper_level': 1e-1 * np.ones([len(env_names), n_m_states]),
-                    'beta_upper_level': 1e-1,
+                    'alpha': 5.0e-2 * np.ones(len(env_names)),                    
+                    'mu': 1.0e-1 * np.ones(len(env_names)),
+                    'eta_PS': 0.1 * np.ones(n_m_states),
+                    'beta_Ss': 0.1, 
+                    'beta_SR': 0.1, 
+                    'beta_nSSA': 0.1,
+                    'beta_AT': 0.1,
+                    'zeta': 0.0,                    
+                    'alpha_upper_level': 1e-2 * np.ones([len(env_names), n_m_states]),
+                    'beta_upper_level': 1e-2,
+                    'nu_upper_level': 1e-2 * np.ones([n_m_states]),
                     'seed': seed,                    
                     'r_lr': 3e-4,
-                    'cm_lr': 3e-4,
+                    'cm_lr': 3e-5,
                     'policy_batch_size': batch_size,
                     'concept_batch_size': 256,                    
                     'reward_learning': 'always',
@@ -125,23 +139,35 @@ if not started:
                     'body_position': False,
                     'model_update_method': 'distribution',
                     'upper_level_annealing' : False,
-                    'upper_policy_steps': 10,
+                    'upper_policy_steps': 30,
                     'evaluation_upper_level_steps': 1,
-                    'threshold_entropy_alpha_upper_level': 0.69,
-                    'threshold_entropy_beta_upper_level': 1.5,
-                    'threshold_entropy_alpha': 0.69,     
-                    'threshold_entropy_mu': -8.0,
-                    'delta_upper_level': 1e-1,
+                    'threshold_entropy_alpha_upper_level': np.log(1.6),
+                    'threshold_entropy_beta_upper_level': np.log(3.5),
+                    'threshold_entropy_nu_upper_level': np.log(2.3),
+                    'max_threshold_entropy_alpha': 0.5,     
+                    'min_threshold_entropy_mu': -8.0,
+                    'delta_threshold_entropies': 1.6e-5,
+                    'delta_upper_level': 5e-2,
                     'eta_upper_level': 1e-1,
-                    'mu_upper_level': 2e-2,
+                    'mu_upper_level': 1e-0,
                     'rate_delta_upper_level': 1.0,
                     'min_delta_upper_level': 3e-2,
                     'min_eta_upper_level': 3e-2,
                     'min_mu_upper_level': 3e-2,                    
                     'reward_scale': 10,
-                    'tau_alpha': 3e-4, 
+                    'tau_alpha': 3e-4,
+                    'tau_alpha_S': 3e-4, 
                     'tau_mu': 3e-4,
-                    'automatic_lower_temperature': True
+                    'automatic_lower_temperature': True,
+                    'PS_min': 1.0/(2.0*n_m_states),
+                    'C_0': 0.0,
+                    'threshold_entropy_beta_Ss': 0.5,
+                    'threshold_entropy_beta_SR': 0.5,
+                    'threshold_entropy_beta_nSSA': 0.5,
+                    'threshold_entropy_beta_AT': 0.5+np.log(1.6)-0.2,
+                    'n_dims_excluded': 2,
+                    'SimPLe_distribution_type_encoder': 'discrete',
+                    'transition_model': 'conditional'
                 }    
 
     system = System(params, agent_params=agent_params)
@@ -160,4 +186,4 @@ epsd_steps = 1000//env_steps
 # system.agent.mu *= 0.5 
 # system.agent.concept_model.optimizer = optim.Adam(system.agent.concept_model.parameters(), lr=3e-5)
 system.train_agent( tr_epsds, epsd_steps, initialization=initialization, iter_=last_iter, rewards=mean_rewards, 
-                    goal_rewards=mean_rewards_goal, metrics=metrics, common_path=common_path)
+                    goal_rewards=mean_rewards_goal, metrics=metrics, common_path=common_path, eval_epsds=2*len(env_names))
