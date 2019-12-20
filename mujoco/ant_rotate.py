@@ -5,32 +5,32 @@ from gym.envs.mujoco.utils import q_inv, q_mult
 
 
 DEFAULT_CAMERA_CONFIG = {
-    'distance': 25.0,
-    'trackbodyid': 2
+    'distance': 16.0,
 }
 
 
-class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
+class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
-                 xml_file='ant_v2_square.xml',
+                 xml_file='ant_v2.xml',
                  ctrl_cost_weight=0,
                  contact_cost_weight=5e-5,
-                 healthy_reward=0.0, # 1.0
+                 healthy_reward=0.0,
                  terminate_when_unhealthy=True,
                  healthy_z_range=(0.2, 1.0),
                  contact_force_range=(-10.0, 10.0),
                  reset_noise_scale=0.1,
-                 velocity_reward_weight=1.0e-0,
+                 velocity_reward_weight=1.0,
                  exclude_current_positions_from_observation=False,
                  rgb_rendering_tracking=True,
                  n_rays=20,
-                 sensor_span=np.pi*0.8,
+                 sensor_span=0.8*np.pi,
                  sensor_range=5):
         utils.EzPickle.__init__(**locals())
 
         self._ctrl_cost_weight = ctrl_cost_weight
         self._contact_cost_weight = contact_cost_weight
 
+        self._velocity_reward_weight = velocity_reward_weight
         self._healthy_reward = healthy_reward
         self._terminate_when_unhealthy = terminate_when_unhealthy
         self._healthy_z_range = healthy_z_range
@@ -38,8 +38,6 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self._contact_force_range = contact_force_range
 
         self._reset_noise_scale = reset_noise_scale
-
-        self._velocity_reward_weight = velocity_reward_weight
 
         self._exclude_current_positions_from_observation = (
             exclude_current_positions_from_observation)
@@ -52,10 +50,26 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         for ray in range(self._n_rays):
             self._ray_angles[ray] = self._sensor_span * (- 0.5 + (2*ray + 1)/(2*self._n_rays))
         self._goal_readings = np.zeros(n_rays)
+        
+        self._obstacle_types = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]        
 
-        self._obstacle_types = [0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        mujoco_env.MujocoEnv.__init__(self, xml_file, 5, rgb_rendering_tracking=rgb_rendering_tracking) 
+        
 
-        mujoco_env.MujocoEnv.__init__(self, xml_file, 5, rgb_rendering_tracking=rgb_rendering_tracking)
+    @property
+    def xy_position(self):
+        return self.get_body_com("torso")[:2].copy()
+
+    @property
+    def head_position(self):
+        # local_head_position = np.asarray(self.model.geom_pos[self.model.geom_names.index('head_geom')], dtype=np.float64)
+        # global_head_position = self.body_position + local_head_position
+        # return global_head_position
+        return np.asarray(self.get_body_com("head")[:3], dtype=np.float64)
+    
+    @property
+    def body_position(self):
+        return np.asarray(self.get_body_com("torso")[:3], dtype=np.float64)
 
     @property
     def orientation(self):
@@ -69,22 +83,16 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         orientation /= np.dot(orientation,orientation)
         return orientation
 
+    @property
+    def xy_orientation_angle(self):
+        x, y = self.xy_orientation
+        return (np.arctan2(y, x) + np.pi)/(2*np.pi)
+
     def ray_orientation(self, theta):
         orientation_quaternion = [0, np.cos(theta), np.sin(theta), 0]
         rotation_quaternion = self.sim.data.qpos[3:7].copy()
         orientation = q_mult(q_mult(rotation_quaternion, orientation_quaternion), q_inv(rotation_quaternion))[1:]
         return orientation
-
-    @property
-    def head_position(self):
-        # local_head_position = np.asarray(self.model.geom_pos[self.model.geom_names.index('head_geom')], dtype=np.float64)
-        # global_head_position = self.body_position + local_head_position
-        # return global_head_position
-        return np.asarray(self.get_body_com("head")[:3], dtype=np.float64)
-    
-    @property
-    def body_position(self):
-        return np.asarray(self.get_body_com("torso")[:3], dtype=np.float64)
 
     def get_current_maze_obs(self):   
         wall_readings = np.zeros(self._n_rays)
@@ -95,7 +103,7 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             ray_theta = self._ray_angles[ray]
             ray_orientation = np.asarray(self.ray_orientation(ray_theta), dtype=np.float64)
             distance, obstacle_id = self.sim.ray_fast_group(self.head_position, ray_orientation, self._obstacle_filter)           
-            if distance <= self._sensor_range:
+            if obstacle_id >= 0 and distance <= self._sensor_range:
                 if self._obstacle_types[obstacle_id] == 1:
                     wall_readings[ray] = (self._sensor_range - distance) / self._sensor_range
                 elif self._obstacle_types[obstacle_id] == 2:
@@ -105,16 +113,25 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
         obs = np.concatenate([
             wall_readings.copy(),
-            self._goal_readings.copy()#,
-            #danger_readings.copy()
+            self._goal_readings.copy()# ,
+            # danger_readings.copy()
         ])
         return obs
 
-    @property    
-    def velocity_reward(self):
-        xy_velocity = self.sim.data.qvel.flat.copy()[:2]
-        velocity_reward = self._velocity_reward_weight * np.dot(xy_velocity, self.xy_orientation)
-        return velocity_reward
+    def rotate_vector(self, angle, vector):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        rotation_matrix = np.array([[ c, s],
+                      [-s, c]])
+        return np.dot(rotation_matrix, vector)                
+
+    def velocity_reward(self, orientation_before):
+        x_before, y_before = orientation_before
+        angle_before = np.arctan2(y_before, x_before)
+        x_rotated, y_rotated = self.rotate_vector(angle_before, self.xy_orientation)        
+        angle_in_previous_frame = np.arctan2(y_rotated, x_rotated)
+        velocity = angle_in_previous_frame/(np.pi * self.dt)
+        return self._velocity_reward_weight * velocity  
 
     @property
     def healthy_reward(self):
@@ -155,28 +172,28 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         return done
 
     def step(self, action):
-        xy_position_before = self.get_body_com("torso")[:2].copy()
+        xy_position_before = self.xy_position
+        xy_orientation_before = self.xy_orientation
         self.do_simulation(action, self.frame_skip)
-        xy_position_after = self.get_body_com("torso")[:2].copy()
+        xy_position_after = self.xy_position
 
-        xy_velocity = (xy_position_after - xy_position_before) / self.dt
+        xy_velocity = (xy_position_after - xy_position_before)
         x_velocity, y_velocity = xy_velocity
-
+        
         ctrl_cost = self.control_cost(action)
         contact_cost = self.contact_cost
 
-        forward_reward = self.velocity_reward
-        healthy_reward = self.healthy_reward        
-
-        rewards = forward_reward + healthy_reward 
+        angular_velocity_reward = self.velocity_reward(xy_orientation_before)
+        healthy_reward = self.healthy_reward
+        
+        rewards = healthy_reward + angular_velocity_reward
         costs = ctrl_cost + contact_cost
 
         reward = rewards - costs
-        goal_reward =  reward
+        goal_reward = reward
         done = self.done
         observation = self._get_obs()
         info = {
-            'reward_forward': forward_reward,
             'reward_ctrl': -ctrl_cost,
             'reward_contact': -contact_cost,
             'reward_survive': healthy_reward,
@@ -187,7 +204,7 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             'distance_from_origin': np.linalg.norm(xy_position_after, ord=2),
 
             'x_velocity': x_velocity,
-            'y_velocity': y_velocity     
+            'y_velocity': y_velocity    
         }
 
         return observation, reward, done, info
@@ -220,22 +237,18 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             self.model.nv)
         self.set_state(qpos, qvel)
 
+        self._goal_readings = np.zeros(self._n_rays)
+
         observation = self._get_obs()
 
         return observation
 
-    # def viewer_setup(self):
-    #     for key, value in DEFAULT_CAMERA_CONFIG.items():
-    #         if isinstance(value, np.ndarray):
-    #             getattr(self.viewer.cam, key)[:] = value
-    #         else:
-    #             setattr(self.viewer.cam, key, value)
-    # def viewer_setup(self):
-    #     self.viewer.cam.trackbodyid = 2
-    #     self.viewer.cam.distance = self.model.stat.extent * 1
-    #     self.viewer.cam.elevation = -40
+    #def viewer_setup(self):
+    #    for key, value in DEFAULT_CAMERA_CONFIG.items():
+    #        if isinstance(value, np.ndarray):
+    #            getattr(self.viewer.cam, key)[:] = value
+    #        else:
+    #            setattr(self.viewer.cam, key, value)
     def viewer_setup(self):
-        self.viewer.cam.distance = self.model.stat.extent * 0.75
-        self.viewer.cam.elevation = -55
-        self.viewer.cam.lookat[0] = 0
-        self.viewer.cam.lookat[2] = 0
+        self.viewer.cam.trackbodyid = 0
+        self.viewer.cam.distance = 20

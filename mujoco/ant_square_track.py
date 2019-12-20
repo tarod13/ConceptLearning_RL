@@ -5,22 +5,24 @@ from gym.envs.mujoco.utils import q_inv, q_mult
 
 
 DEFAULT_CAMERA_CONFIG = {
-    'distance': 16.0,
+    'distance': 30.0,
+    'elevation': -55,
+    'lookat': np.array([6.5,0,0])
 }
 
 
 class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
                  xml_file='ant_v2_square_track.xml',
-                 ctrl_cost_weight=0.0,
-                 contact_cost_weight=0.0,
+                 ctrl_cost_weight=0,
+                 contact_cost_weight=5e-5,
                  healthy_reward=0.0,
                  terminate_when_unhealthy=True,
                  healthy_z_range=(0.2, 1.0),
-                 contact_force_range=(-1.0, 1.0),
+                 contact_force_range=(-10.0, 10.0),
                  reset_noise_scale=0.1,
                  velocity_reward_weight=1.0e-0,
-                 exclude_current_positions_from_observation=True,
+                 exclude_current_positions_from_observation=False,
                  rgb_rendering_tracking=True,
                  n_rays=20,
                  sensor_span=np.pi*0.8,
@@ -74,12 +76,12 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         orientation = q_mult(q_mult(rotation_quaternion, orientation_quaternion), q_inv(rotation_quaternion))[1:]
         return orientation
 
-
     @property
     def head_position(self):
-        local_head_position = np.asarray(self.model.geom_pos[self.model.geom_names.index('head')], dtype=np.float64)
-        global_head_position = self.body_position + local_head_position
-        return global_head_position
+        # local_head_position = np.asarray(self.model.geom_pos[self.model.geom_names.index('head_geom')], dtype=np.float64)
+        # global_head_position = self.body_position + local_head_position
+        # return global_head_position
+        return np.asarray(self.get_body_com("head")[:3], dtype=np.float64)
     
     @property
     def body_position(self):
@@ -104,8 +106,8 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
         obs = np.concatenate([
             wall_readings.copy(),
-            self._goal_readings.copy(),
-            danger_readings.copy()
+            self._goal_readings.copy()# ,
+            # danger_readings.copy()
         ])
         return obs
 
@@ -143,7 +145,7 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     @property
     def contact_cost(self):
         contact_cost = self._contact_cost_weight * np.sum(
-            np.square(self.contact_forces))
+            np.square(self.contact_forces[:,:5]))
         return contact_cost
 
     # @property
@@ -211,6 +213,11 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         if self._exclude_current_positions_from_observation:
             position = position[2:]
 
+        # print("Maze obs:")
+        # print(np.around(maze_obs*10,1))
+        # print("Contact force:")
+        # print(contact_force)
+
         observations = np.concatenate((position, velocity, maze_obs))
 
         return observations
@@ -229,9 +236,14 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
         return observation
 
+    # def viewer_setup(self):
+    #     for key, value in DEFAULT_CAMERA_CONFIG.items():
+    #         if isinstance(value, np.ndarray):
+    #             getattr(self.viewer.cam, key)[:] = value
+    #         else:
+    #             setattr(self.viewer.cam, key, value)
     def viewer_setup(self):
-        for key, value in DEFAULT_CAMERA_CONFIG.items():
-            if isinstance(value, np.ndarray):
-                getattr(self.viewer.cam, key)[:] = value
-            else:
-                setattr(self.viewer.cam, key, value)
+        self.viewer.cam.distance = self.model.stat.extent * 0.75
+        self.viewer.cam.elevation = -55
+        self.viewer.cam.lookat[0] = 6.5
+        self.viewer.cam.lookat[2] = 0
