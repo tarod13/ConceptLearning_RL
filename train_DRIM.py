@@ -167,7 +167,7 @@ if not started:
                     'threshold_entropy_beta_AT': 0.5+np.log(1.6)-0.2,
                     'n_dims_excluded': 2,
                     'SimPLe_distribution_type_encoder': 'discrete',
-                    'transition_model': 'conditional'
+                    'transition_model': 'VQVAE'
                 }    
 
     system = System(params, agent_params=agent_params)

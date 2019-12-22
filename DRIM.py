@@ -9,7 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from nets import (Memory, v_valueNet, q_valueNet, policyNet, conditionalEncoder, mixtureConceptModel, encoderConceptModel, 
                     rNet, rewardNet, v_parallel_valueNet, q_parallel_valueNet, nextSNet, conceptLossNet, transitionNet, 
-                    r_parallelNet, SimPLeNet, ConditionalSimPLeNet)
+                    r_parallelNet, SimPLeNet, ConditionalSimPLeNet, AutoregressivePrior, ConditionalVQVAE_Net)
 from tabularQ import Agent as mAgent
 
 import os
@@ -367,8 +367,11 @@ class Agent:
             # self.transition_model = transitionNet(s_dim, a_dim, lr=self.params['r_lr']).to(device)
             if self.transition_model_type == 'conditional':
                 self.transition_model = ConditionalSimPLeNet(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['t_lr'], C_0=self.params['C_0'], distribution_type=self.params['SimPLe_distribution_type_encoder']).to(device)
-            else:
+            elif self.transition_model_type == 'SimPLe':
                 self.transition_model = SimPLeNet(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['t_lr'], C_0=self.params['C_0'], distribution_type=self.params['SimPLe_distribution_type_encoder']).to(device)
+            else:
+                self.transition_model = ConditionalVQVAE_Net(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['t_lr']).to(device)
+            self.latent_prior = AutoregressivePrior(self.transition_model.latent_dim, period=self.upper_level_period, n_tasks=self.n_tasks).to(device)
             # self.R_model = rNet(s_dim, self.n_m_actions, n_tasks=self.n_tasks, lr=self.params['r_lr']).to(device)
             # self.reward_model = RNet(n_m_states, n_tasks=n_tasks, lr=r_lr).to(device)
             # self.meta_critic = np.random.rand(self.n_tasks, self.n_m_states, self.n_m_actions)/self.alpha
@@ -850,30 +853,36 @@ class Agent:
                 # self.reward_model.optimizer.step()
                 # assert torch.all(self.reward_model.l1.weight==self.reward_model.l1.weight), 'Invalid reward model parameters'
                 # self.transition_model.train()
-                ns_batch_off, r_batch_off, mean_off, log_stdev_off, z_off = self.transition_model(s_batch, a_batch, T_batch, ns=ns_batch)
-                if self.transition_model_type != 'conditional':
-                    ns_batch_off = ns_batch_off[np.arange(batch_size), T_batch, :]
-                    r_batch_off = r_batch_off[np.arange(batch_size), T_batch]
-                    mean_off = mean_off[np.arange(batch_size), T_batch, :]
-                    log_stdev_off = log_stdev_off[np.arange(batch_size), T_batch, :]
-                    z_off = z_off[np.arange(batch_size), T_batch, :]
-                # assert ns_batch_off.shape == ns_batch.shape, 'wrong transition model size'
-                transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, 
-                                                                    r_batch.detach(), mean_off, log_stdev_off,
-                                                                    z_off)
+                if self.transition_model_type in ['conditional', 'SimPLe']: 
+                    ns_batch_off, r_batch_off, mean_off, log_stdev_off, z_off = self.transition_model(s_batch, a_batch, T_batch, ns=ns_batch)
+                    if self.transition_model_type != 'conditional':
+                        ns_batch_off = ns_batch_off[np.arange(batch_size), T_batch, :]
+                        r_batch_off = r_batch_off[np.arange(batch_size), T_batch]
+                        mean_off = mean_off[np.arange(batch_size), T_batch, :]
+                        log_stdev_off = log_stdev_off[np.arange(batch_size), T_batch, :]
+                        z_off = z_off[np.arange(batch_size), T_batch, :]
+                    # assert ns_batch_off.shape == ns_batch.shape, 'wrong transition model size'
+                    transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), mean_off, log_stdev_off, z_off)
+                else:
+                    ns_batch_off, r_batch_off, ze_off, e_off = self.transition_model(s_batch, a_batch, T_batch)
+                    transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), ze_off, e_off)
                 
                 print("transition loss: "+ str(np.round(transition_loss.item(),4)))
                 print("transition loss std: "+ str(np.round(((ns_batch-ns_batch_off)**2).mean().item(),4)))
                 print("transition loss std 2: "+ str(np.round(((ns_batch[:,:87]-ns_batch_off[:, :87])**2).mean().item(),4)))
                 print("reward loss: "+ str(np.round(((r_batch_off - r_batch)**2).mean().item(),4)))
-                print("mean stdev: "+ str(np.round(torch.exp(log_stdev_off).mean().item(),4)))
-                print("C: " + str(self.transition_model.C))
+                if self.transition_model_type in ['conditional', 'SimPLe']: 
+                    print("mean stdev: "+ str(np.round(torch.exp(log_stdev_off).mean().item(),4)))
+                    print("C: " + str(self.transition_model.C))
 
                 self.transition_model.optimizer.zero_grad()
                 transition_loss.backward()
                 clip_grad_norm_(self.transition_model.parameters(), self.clip_value)
                 self.transition_model.optimizer.step()
-                assert torch.all(self.transition_model.decoder.l1.weight==self.transition_model.decoder.l1.weight), 'Invalid transition model parameters'
+                if self.transition_model_type in ['conditional', 'SimPLe']: 
+                    assert torch.all(self.transition_model.decoder.l1.weight==self.transition_model.decoder.l1.weight), 'Invalid transition model parameters'
+                else:
+                    assert torch.all(self.transition_model.decoder.lv1.weight==self.transition_model.decoder.lv1.weight), 'Invalid transition model parameters'
 
             # Optimize v network
             if self.hierarchical:
@@ -1071,6 +1080,10 @@ class Agent:
             s_batch_off_flat = s_batch_off.reshape(-1,self.s_dim).clone()
             R_batch_off = torch.zeros(batch_size,self.n_m_actions).to(device)
             
+            t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
+            t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
+            z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
+
             for i in range(0, self.upper_level_period):
                 assert batch_size > 0, 'empty memory'
                 assert torch.all(self.actor.l11.weight==self.actor.l11.weight), 'Invalid reward model parameters'
@@ -1079,9 +1092,15 @@ class Agent:
                 # R_batch_off += self.reward_model(s_batch_off_flat, a_batch_off).reshape(-1,self.n_m_actions,self.n_tasks).clone()[np.arange(batch_size),:,T_batch]
                 # assert torch.all(self.transition_model.l1.weight==self.transition_model.l1.weight), 'Invalid reward model parameters'
                 # self.transition_model.eval()
-
-                s_batch_off, r_batch_off = self.transition_model(s_batch_off_flat, a_batch_off, T_batch.repeat(self.n_m_actions))                
-                if self.transition_model_type == 'conditional':
+                if self.transition_model_type == 'VQVAE':
+                    z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
+                    z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
+                    z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
+                    z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
+                else:
+                    z=z_batch[:,i,:]
+                s_batch_off, r_batch_off = self.transition_model(s_batch_off_flat, a_batch_off, T_batch.repeat(self.n_m_actions), z=z)[:2]                
+                if self.transition_model_type in ['conditional', 'VQVAE']:
                     s_batch_off = s_batch_off.reshape(-1,self.n_m_actions,self.s_dim).clone()
                     r_batch_off = r_batch_off.reshape(-1,self.n_m_actions).clone()
                 else:
@@ -1377,14 +1396,26 @@ class Agent:
             a_upper_batches_off = []
             R_batch_off = torch.zeros(batch_size,self.n_m_actions).float().to(device)
             
+            t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
+            t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
+            z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
+
             for i in range(0, self.upper_level_period):
                 a_upper_batches_off.append(self.actor.sample_actions(s_upper_batches_off[-1][:,:,self.n_dims_excluded:], repeat=False).detach())
                 # R_batch_off += self.reward_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim)).view(-1,self.n_m_actions,self.n_tasks)[np.arange(batch_size),:,T_batch].detach()              
                 # s_upper_batches_off.append(self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim)).detach().view(-1,self.n_m_actions,self.n_tasks,self.s_dim)[np.arange(batch_size),:,T_batch,:])
                 # self.transition_model.eval()
+
+                if self.transition_model_type == 'VQVAE':
+                    z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
+                    z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
+                    z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
+                    z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
+                else:
+                    z=z_batch[:,i,:]
                 
-                s_batch_off, r_batch_off = self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim), T_batch.repeat(self.n_m_actions))
-                if self.transition_model_type == 'conditional':
+                s_batch_off, r_batch_off = self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim), T_batch.repeat(self.n_m_actions), z=z)[0:2]
+                if self.transition_model_type in ['conditional', 'VQVAE']:
                     s_batch_off = s_batch_off.view(-1,self.n_m_actions,self.s_dim)
                     r_batch_off = r_batch_off.view(-1,self.n_m_actions)
                 else:
@@ -1703,7 +1734,48 @@ class Agent:
                 'D3': action_divergence_metric.mean().detach().cpu().numpy()
             }
             
-            return metrics         
+            return metrics     
+
+    def learn_prior(self): 
+        id_batch = np.random.randint(len(self.memory.data)-self.upper_level_period, size=(self.concept_batch_size))
+        batch = []
+        for i in id_batch:
+            batch += [self.memory.data[i:i+self.upper_level_period]]
+        batch = np.array(batch)
+
+        s_batch = torch.FloatTensor(batch[:,:,:self.s_dim]).to(device)
+        a_batch = torch.FloatTensor(batch[:,:,self.s_dim:self.sa_dim]).to(device)
+        r_batch = torch.FloatTensor(batch[:,:,self.sa_dim]).to(device)
+        ns_batch = torch.FloatTensor(batch[:,:,self.sa_dim+1:self.sars_dim]).to(device)
+        d_batch = torch.FloatTensor(batch[:,:,self.sars_dim]).to(device)
+        T_batch = batch[:,:,self.sarsd_dim+1].astype('int') 
+
+        batch_size = self.concept_batch_size*self.upper_level_period
+        t_mask = torch.zeros(batch_size, self.n_tasks).to(device)
+        t_mask[np.arange(batch_size), T_batch.reshape(-1)] = torch.ones(batch_size,).to(device)
+
+        if self.transition_model_type in ['conditional', 'SimPLe']: 
+            mean_batch = self.transition_model.encoder(s_batch.view(-1,self.s_dim), a_batch.view(-1,self.a_dim), ns_batch.view(-1,self.s_dim), t_mask)[1]
+            mean_batch = mean_batch.view(self.concept_batch_size, -1) # TODO: Check correctness
+            mean_batch_valid = mean_batch[d_batch.sum(1)<1.0,:]
+            z_batch = (mean_batch_valid > torch.rand_like(mean_batch_valid)).float()
+        else:
+            ze_batch = self.transition_model.encoder(s_batch.view(-1,self.s_dim))
+            z_batch_dec = self.transition_model.embedding_space.code2latent(ze_batch).view(-1).detach().cpu()
+            z_batch_dec_separated = np.concatenate([(z_batch_dec//(2**(self.transition_model.latent_dim//self.transition_model.n_channels-1))).view(-1,1).numpy().astype('uint8'), z_batch_dec.view(-1,1).numpy().astype('uint8')], 1)
+            z_batch_bin = np.unpackbits(z_batch_dec_separated, count=16, axis=1)[:,-self.transition_model.latent_dim//self.transition_model.n_channels:]
+            z_batch = torch.from_numpy(z_batch_bin.reshape(self.concept_batch_size,-1)).float().to(device)
+
+        p = self.latent_prior(z_batch.detach(), t_mask.reshape(self.concept_batch_size, self.upper_level_period, self.n_tasks)[:,0,:])
+        prior_model_loss = -(z_batch.detach()*torch.log(p+1e-10) + (1-z_batch.detach())*torch.log((1-p).clamp(1e-10,1.0))).sum(1).mean()
+        self.concept_model.optimizer.zero_grad()
+        prior_model_loss.backward()
+        clip_grad_norm_(self.latent_prior.parameters(), self.clip_value)
+        self.latent_prior.optimizer.step()
+        assert torch.all(self.latent_prior.l1.weight==self.latent_prior.l1.weight), 'Invalid concept model parameters'
+
+        print("prior model loss: " + str(np.round(prior_model_loss.item(),4)))
+                        
     
     def estimate_macro_policies(self, s):
         with torch.no_grad():
@@ -1731,11 +1803,14 @@ class Agent:
         else:
             if self.bottom_level_epsds % (self.skill_steps + self.concept_steps) < self.skill_steps:
                 self.learn_skills()
+                self.learn_prior()
                 if self.reward_learning == 'always':
-                    self.learn_reward()                
-            else:                
+                    self.learn_reward()                               
+            else:    
+                self.learn_prior()            
                 self.learn_reward()
                 self.learn_concepts()
+                
     
     def save(self, common_path, specific_path):
         self.params['alpha_upper_level'] = self.alpha_upper_level
@@ -1744,7 +1819,8 @@ class Agent:
         self.params['alpha'] = self.alpha
         self.params['eta_PS'] = self.eta_PS
         self.params['mu'] = self.mu
-        self.params['C_0'] = self.transition_model.C
+        if self.transition_model_type in ['conditional', 'SimPLe']:
+            self.params['C_0'] = self.transition_model.C
         pickle.dump(self.params,open(common_path+'/agent_params.p','wb'))
         data_batches = {'l': len(self.memory.data)//20000+1}
         for i in range(0, data_batches['l']):

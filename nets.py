@@ -775,7 +775,8 @@ class ConditionalSimPLeNet(nn.Module):
         super().__init__()      
         
         self.encoder = ConditionalSimPLe_encoderNet(s_dim, a_dim, n_tasks=n_tasks, lr=lr, distribution_type=distribution_type)
-        self.decoder = ConditionalSimPLe_decoderNet(s_dim, a_dim, n_tasks=n_tasks, lr=lr, latent_dim=self.encoder.out_dim)
+        self.latent_dim = self.encoder.out_dim
+        self.decoder = ConditionalSimPLe_decoderNet(s_dim, a_dim, n_tasks=n_tasks, lr=lr, latent_dim=self.latent_dim)
         self.n_tasks = n_tasks
         self.beta = beta
         self.max_C = max_C
@@ -796,7 +797,7 @@ class ConditionalSimPLeNet(nn.Module):
 
         # self.mean_stdev = 1.0  
     
-    def forward(self, s, a, t, ns=[]):
+    def forward(self, s, a, t, ns=[], z=[]):
         t_mask = torch.zeros(s.size(0), self.n_tasks).to(device)
         t_mask[np.arange(s.size(0)), t] = torch.ones(s.size(0),).to(device)
 
@@ -811,11 +812,12 @@ class ConditionalSimPLeNet(nn.Module):
 
             # self.mean_stdev += 0.1 *(torch.exp(log_stdev).mean().item()-self.mean_stdev)
         else:
-            if self.encoder_distribution_type == 'discrete':
-                r = torch.rand(s.size(0),self.encoder.out_dim).to(device)
-                z = (r > 0.5).float()
-            else:
-                z = torch.randn(s.size(0),self.encoder.out_dim).to(device) # * self.mean_stdev
+            if len(z) <= 0:
+                if self.encoder_distribution_type == 'discrete':
+                    r = torch.rand(s.size(0),self.encoder.out_dim).to(device)
+                    z = (r > 0.5).float()
+                else:
+                    z = torch.randn(s.size(0),self.encoder.out_dim).to(device) # * self.mean_stdev
 
         ns, r = self.decoder(s,a,z,t_mask,self.min_values,self.max_values)
         
@@ -863,16 +865,245 @@ class AutoregressivePrior(nn.Module):
     
     def forward(self, z, t):
         x = F.relu(self.l1(z)) * torch.sigmoid(self.a1(t))
-        x = F.relu(self.l2(z)) * torch.sigmoid(self.a2(t))
-        p = torch.sigmoid(self.l3(z)) * torch.sigmoid(self.a3(t))
+        x = F.relu(self.l2(x)) * torch.sigmoid(self.a2(t))
+        p = torch.sigmoid(self.l3(x)) * torch.sigmoid(self.a3(t))
         return p
 
     def sample(self, t):
-        z = torch.ones(1, self.lenght).to(device)
-        for i in range(0,self.lenght):
-            p = self(z,t.view(1,-1))
-            z[0,i] = (np.random.rand() < p[0,i])*1.0
+        z = torch.ones(t.size(0), self.length).to(device)
+        for i in range(0,self.length):
+            p = self(z,t)
+            z[:,i] = (torch.rand(t.size(0)).to(device) < p[:,i])*1.0
         return z
+
+
+class ConditionalVQVAE_encoderNet(nn.Module):
+    def __init__(self, s_dim, vision_dim=20, vision_channels=2):
+        super().__init__()
+        self.vision_channels = vision_channels
+        self.vision_dim = vision_dim
+        self.kinematic_dim = s_dim - vision_dim*vision_channels     
+        
+        nc1 = vision_channels * 2
+        nc2 = vision_channels * 3
+        nc3 = vision_channels * 4
+
+        kernel_size = 2
+        stride1 = 2
+        stride2 = 2
+        stride3 = 1
+        
+        k_dim1 = (2*self.kinematic_dim)//3+1
+        k_dim2 = (3*k_dim1)//5
+        k_dim3 = (2*k_dim2)//3
+
+        v_dim1 = int((vision_dim - kernel_size)/stride1 + 1)
+        v_dim2 = int((v_dim1 - kernel_size)/stride2 + 1)
+        v_dim3 = int((v_dim2 - kernel_size)/stride3 + 1)
+        
+        self.out_channels = nc3
+        self.out_dim = v_dim3+k_dim3
+
+        self.lv1 = nn.Conv1d(vision_channels, nc1, kernel_size, stride=stride1)
+        self.lv2 = nn.Conv1d(nc1, nc2, kernel_size, stride=stride2)
+        self.lv3 = nn.Conv1d(nc2, nc3, kernel_size, stride=stride3)
+
+        self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
+        self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
+        self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
+
+        self.lm1 = parallel_Linear(nc3, self.out_dim, self.out_dim)
+        self.lm2 = parallel_Linear(nc3, self.out_dim, self.out_dim)
+        
+        self.bn1 = nn.BatchNorm1d(nc1)
+        self.bn2 = nn.BatchNorm1d(nc2)
+        self.bn3 = nn.BatchNorm1d(nc3)
+                        
+        self.apply(weights_init_)
+    
+    def forward(self, s):
+        vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
+        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
+
+        v = F.relu(self.bn1(self.lv1(vision_input)))
+        assert v.size(2) == 10, 'wtf vdim'
+        v = F.relu(self.bn2(self.lv2(v)))
+        assert v.size(2) == 5, 'wtf vdim'
+        v = self.lv3(v)
+        assert v.size(2) == 4, 'wtf vdim'
+
+        k = F.relu(self.bn1(self.lk1(kinematic_input)))
+        k = F.relu(self.bn2(self.lk2(k)))
+        k = self.lk3(k)
+
+        ze = torch.cat([k,v],2)
+        ze = F.relu(self.bn3(self.lm1(ze)))
+        ze = self.lm2(ze)
+
+        return ze
+
+class ConditionalVQVAE_decoderNet(nn.Module):
+    def __init__(self, s_dim, a_dim, n_tasks=1, vision_dim=20, vision_channels=2):
+        super().__init__()      
+        self.n_tasks = n_tasks
+        self.vision_channels = vision_channels
+        self.vision_dim = vision_dim
+        self.kinematic_dim = s_dim - vision_dim*vision_channels      
+        
+        nc1 = vision_channels * 2
+        nc2 = vision_channels * 3
+        nc3 = vision_channels * 4
+
+        kernel_size = 2
+        stride1 = 2
+        stride2 = 2
+        stride3 = 1
+        
+        k_dim1 = (2*self.kinematic_dim)//3+1
+        k_dim2 = (3*k_dim1)//5
+        k_dim3 = (2*k_dim2)//3
+
+        v_dim1 = int((vision_dim - kernel_size)/stride1 + 1)
+        v_dim2 = int((v_dim1 - kernel_size)/stride2 + 1)
+        v_dim3 = int((v_dim2 - kernel_size)/stride3 + 1)
+        
+        self.in_channels = nc3
+        self.in_dim = v_dim3+k_dim3
+        self.latent_vision_dim = v_dim3
+
+        self.lv1 = nn.ConvTranspose1d(nc3, nc2, kernel_size, stride=stride3)
+        self.lv2 = nn.ConvTranspose1d(nc2, nc1, kernel_size, stride=stride2)
+        self.lv3 = nn.ConvTranspose1d(nc1, vision_channels, kernel_size, stride=stride1)
+        
+        self.lk1 = multichannel_Linear(nc3, nc2, k_dim3, k_dim2)
+        self.lk2 = multichannel_Linear(nc2, nc1, k_dim2, k_dim1)
+        self.lk3 = multichannel_Linear(nc1, 1, k_dim1, self.kinematic_dim)
+        
+        self.la1 = nn.Linear(a_dim+n_tasks, self.in_dim*nc3)
+        self.la2 = nn.Linear(a_dim+n_tasks, self.in_dim*nc3)
+        self.lak1 = nn.Linear(a_dim+n_tasks, k_dim2*nc2)
+        self.lak2 = nn.Linear(a_dim+n_tasks, k_dim1*nc1)
+        self.lak3 = nn.Linear(a_dim+n_tasks, self.kinematic_dim)
+        self.lav1 = nn.Linear(a_dim+n_tasks, v_dim2*nc2)
+        self.lav2 = nn.Linear(a_dim+n_tasks, v_dim1*nc1)
+        self.lav3 = nn.Linear(a_dim+n_tasks, self.vision_dim*self.vision_channels)
+        self.lar1 = nn.Linear(n_tasks, 100)
+
+        self.lm1 = parallel_Linear(nc3, self.in_dim, self.in_dim)
+        self.lm2 = parallel_Linear(nc3, self.in_dim, self.in_dim)
+
+        self.lr1 = nn.Linear(s_dim+a_dim+self.in_dim*nc3, 100)
+        self.lr2 = nn.Linear(100, 1)
+        
+        self.bn1 = nn.BatchNorm1d(nc3)
+        self.bn2 = nn.BatchNorm1d(nc2)
+        self.bn3 = nn.BatchNorm1d(nc1)
+        self.bnr = nn.BatchNorm1d(100)
+                
+        self.apply(weights_init_)
+    
+    def forward(self, zq, a, t):
+        t_mask = torch.zeros(a.size(0), self.n_tasks).to(device)
+        t_mask[np.arange(a.size(0)), t] = torch.ones(a.size(0),).to(device)
+        attention_input = torch.cat([a,t_mask],1)
+
+        x = F.relu(self.bn1(self.lm1(zq))) * torch.sigmoid(self.la1(attention_input)).view(-1,self.in_channels, self.in_dim)
+        x = F.relu(self.bn1(self.lm2(x))) * torch.sigmoid(self.la2(attention_input)).view(-1,self.in_channels, self.in_dim)
+
+        v = x[:,:,-self.latent_vision_dim:]
+        k = x[:,:,:-self.latent_vision_dim]
+
+        k = F.relu(self.bn2(self.lk1(k)))
+        k = k * torch.sigmoid(self.lak1(attention_input)).view(k.size())
+        k = F.relu(self.bn3(self.lk2(k)))
+        k = k * torch.sigmoid(self.lak2(attention_input)).view(k.size())
+        k = self.lk3(k)
+        k = k.squeeze(1) * torch.sigmoid(self.lak3(attention_input))
+
+        v = F.relu(self.bn2(self.lv1(v)))
+        v = v * torch.sigmoid(self.lav1(attention_input)).view(v.size())
+        v = F.relu(self.bn3(self.lv2(v)))
+        v = v * torch.sigmoid(self.lav2(attention_input)).view(v.size())
+        v = self.lv3(v)
+        v = v.view(-1,self.vision_dim*self.vision_channels) * torch.sigmoid(self.lav3(attention_input))
+
+        ns = torch.cat([k,v],1)
+        
+        r = torch.cat([ns,a,zq.view(-1,self.in_dim*self.in_channels)],1)
+        r = F.relu(self.bnr(self.lr1(r))) * torch.sigmoid(self.lar1(t_mask))
+        r = self.lr2(r)
+        
+        return ns, r
+
+class ConditionalVQVAE_embeddingSpaceNet(nn.Module):
+    def __init__(self, s_dim, n_embedding_vectors=512, std_init=1.0, embedding_dim=1):
+        super().__init__()      
+        self.embedding_dim = embedding_dim
+
+        self.n_embedding_vectors = n_embedding_vectors
+        self.dictionary = Parameter(torch.Tensor(n_embedding_vectors, embedding_dim))
+        nn.init.normal_(self.dictionary, mean=0.0, std=std_init)
+    
+    def code2latent(self, ze):
+        z = ((self.dictionary.unsqueeze(0).unsqueeze(2) - ze.unsqueeze(1))**2).sum(3).argmin(1)
+        return z
+    
+    def forward(self, ze, z=[]):
+        if len(z) == 0:
+            z = self.code2latent(ze)
+        e = self.dictionary[z.view(-1),:].view(z.size(0), z.size(1), -1)
+        zq = e.clone()
+        return zq, e
+
+class ConditionalVQVAE_Net(nn.Module):
+    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, beta=10.0, reward_weight=1.0, alpha=0.99):
+        super().__init__()
+
+        self.encoder = ConditionalVQVAE_encoderNet(s_dim)
+        self.decoder = ConditionalVQVAE_decoderNet(s_dim, a_dim, n_tasks=n_tasks)
+        self.embedding_space = ConditionalVQVAE_embeddingSpaceNet(s_dim, embedding_dim=self.encoder.out_dim)
+        self.latent_dim = int(np.log2(self.embedding_space.n_embedding_vectors)*self.encoder.out_channels)
+        self.n_channels = self.encoder.out_channels
+
+        self.alpha = alpha
+        self.beta = beta
+        self.reward_weight = reward_weight
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
+        
+        self.estimated_mean = torch.zeros(1,s_dim).to(device)
+        self.estimated_std = torch.zeros(1,s_dim).to(device)
+        self.reward_mean = 0.0
+        self.reward_std = 0.0
+    
+    def forward(self, s, a, t, z=[]):
+        self.estimated_mean = self.alpha * self.estimated_mean + (1.0-self.alpha) * s.mean(0, keepdim=True).detach()
+        self.estimated_std = self.alpha * self.estimated_std + (1.0-self.alpha) * (((s-self.estimated_mean)**2).mean(0, keepdim=True)**0.5).detach()
+
+        ze = self.encoder(s)
+        zq, e = self.embedding_space(ze, z=z)
+        zq = zq.detach() + ze - ze.detach()
+        ns, r = self.decoder(zq, a, t)
+        return ns, r, ze, e
+    
+    def loss_func(self, ns_off, ns, r_off, r, ze, e):
+        self.reward_mean = self.alpha * self.reward_mean + (1.0-self.alpha) * r.mean().detach()
+        self.reward_std = self.alpha * self.reward_std + (1.0-self.alpha) * (((r-self.reward_mean)**2).mean()**0.5).detach()
+
+        reconstruction_error = (((ns_off - ns) / (self.estimated_std+1e-6))**2).sum(1).mean()
+        reward_error = (((r_off-r) / (self.reward_std+1e-6))**2).mean()
+        VQ_loss = ((ze.detach()-e)**2).sum(2).mean()
+        commitment_loss = ((ze-e.detach())**2).sum(2).mean()
+
+        loss = reconstruction_error + self.reward_weight * reward_error + VQ_loss + self.beta * commitment_loss
+
+        print("reconstruction loss: "+ str(np.round(reconstruction_error.item(),4)))
+        print("reward reconstruction loss: "+ str(np.round(self.reward_weight * reward_error.item(),4)))
+        print("VQ loss: "+ str(np.round(VQ_loss.item(),4)))
+        print("commitment loss: "+ str(np.round(commitment_loss.item(),4)))
+
+        return loss
+
 
 class RNet(nn.Module):
     def __init__(self, n_m_states, n_tasks=1, lr=3e-4, latent_dim=10, hidden_dim=256, init_method='glorot'):
@@ -1002,7 +1233,7 @@ class parallel_Linear(nn.Module):
 class AutoregressiveLinear(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.dim
+        self.dim = dim
         self.weight = Parameter(torch.Tensor(dim, dim))
         self.bias = Parameter(torch.Tensor(dim))
         self.mask = torch.zeros(dim, dim).to(device)        
@@ -1014,7 +1245,7 @@ class AutoregressiveLinear(nn.Module):
         bound = 1 / math.sqrt(fan_in)
         nn.init.uniform_(self.bias, -bound, bound)
         x,y = np.tril_indices(self.dim)
-        self.mask[x,y] = torch.ones(self.dim*(self.dim+1)/2).to(device)
+        self.mask[x,y] = torch.ones((self.dim*(self.dim+1))//2).to(device)
 
     def forward(self, input):
         return torch.einsum('ik,lk->il', input, self.weight*self.mask) + self.bias.unsqueeze(0) 
@@ -1053,6 +1284,26 @@ class parallel_Linear_simple(nn.Module):
         return 'in_features={}, out_features={}, bias={}'.format(
             self.in_features, self.out_features, self.bias is not None
         ) 
+
+class multichannel_Linear(nn.Module):
+    def __init__(self, n_channels_in, n_channels_out, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.n_channels_in = n_channels_in
+        self.n_channels_out = n_channels_out
+        self.weight = Parameter(torch.Tensor(n_channels_in, n_channels_out, in_features, out_features))
+        self.bias = Parameter(torch.Tensor(n_channels_out, out_features))        
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+        bound = 1 / math.sqrt(fan_in)
+        nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input):
+        return torch.einsum('ijk,jlkm->ilm', input, self.weight) + self.bias.unsqueeze(0) 
 
 class v_parallel_valueNet(nn.Module):
     def __init__(self, s_dim, n_tasks=1, lr=3e-4, init_method='glorot'):
