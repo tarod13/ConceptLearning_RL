@@ -68,9 +68,13 @@ def one_hot_embedding(labels, num_classes):
 def set_seed(n_seed):
     np.random.seed(n_seed)
     torch.manual_seed(n_seed)
-    if device == "cuda":
-        torch.cuda.manual_seed(n_seed)
+    if device == "cuda": torch.cuda.manual_seed(n_seed)
 
+def is_float(x):
+    return isinstance(x, float)
+
+def is_tensor(x):
+    return isinstance(x, torch.FloatTensor) or isinstance(x, torch.Tensor)
 
 ###########################################################################
 #
@@ -93,14 +97,14 @@ class Agent:
                             'delta_threshold_entropy_alpha': 1.6e-5,
 
                             'lr': {
-                                    'cl': {
+                                    'sl': {
                                             'q': 3e-4,
                                             'v': 3e-4,
                                             'pi': 3e-4,
                                             'alpha': 3e-4,
                                             'v_target': 5e-3
                                         },
-                                    'sl': {
+                                    'cl': {
                                             'q': 3e-4,
                                             'v': 3e-4
                                         }
@@ -112,8 +116,8 @@ class Agent:
                                     },
                             
                             'batch_size': {
-                                            'cl': 256,
-                                            'sl': 256
+                                            'sl': 256,
+                                            'cl': 256
                                         },
 
                             'memory_capacity': 400000,
@@ -134,7 +138,7 @@ class Agent:
 
         self.n_tasks = n_tasks
         self.seed = seed
-        self.n_skills = n_tasks['cl']
+        self.n_skills = n_tasks['sl']
 
         self.n_concepts = self.params['n_concepts']
         self.dim_excluded = self.params['dim_excluded']
@@ -147,36 +151,32 @@ class Agent:
         self.min_threshold_entropy_alpha = -a_dim*1.0
         self.threshold_entropy_alpha = self.params['init_threshold_entropy_alpha']
         self.delta_threshold_entropy_alpha = self.params['delta_threshold_entropy_alpha']
-        if isinstance(self.params['alpha'], float):
-            self.alpha = self.params['alpha'] * torch.ones(self.n_tasks['cl']).float().to(device)
-        elif isinstance(self.params['alpha'], torch.FloatTensor) or isinstance(self.params['alpha'], torch.Tensor):
-            self.alpha = self.params['alpha'].float().to(device)
-        else:
-            self.alpha = torch.from_numpy(self.params['alpha']).float().to(device)
-        
+        alpha = self.params['alpha']
+        self.alpha = (alpha * torch.ones(self.n_tasks['sl']).float().to(device) if is_float(alpha) else 
+                        (alpha.float().to(device) if is_tensor(alpha) else torch.from_numpy(alpha).float().to(device)))
         
         # Nets and memory
         self.critic1 = {
-                            'cl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device),
-                            'sl': q_valueNet(s_dim, a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device)
+                            'sl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
+                            'cl': q_valueNet(s_dim, a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device)
                         }
         self.critic2 = {
-                            'cl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device),
-                            'sl': q_valueNet(s_dim, a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device)
+                            'sl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
+                            'cl': q_valueNet(s_dim, a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device)
                         }
         self.v = {
-                            'cl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['cl'], lr=self.lr['cl']['v']).to(device),
-                            'sl': v_valueNet(s_dim, n_tasks['sl'], lr=self.lr['sl']['v']).to(device)
+                            'sl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
+                            'cl': v_valueNet(s_dim, n_tasks['cl'], lr=self.lr['cl']['v']).to(device)
                         }
         self.v_target = {
-                            'cl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['cl'], lr=self.lr['cl']['v']).to(device),
-                            'sl': v_valueNet(s_dim, n_tasks['sl'], lr=self.lr['sl']['v']).to(device)
+                            'sl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
+                            'cl': v_valueNet(s_dim, n_tasks['cl'], lr=self.lr['cl']['v']).to(device)
                         }
-        self.actor = policyNet(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['cl']['pi']).to(device)
+        self.actor = policyNet(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['sl']['pi']).to(device)
 
         self.memory = {
-                        'cl':  Memory(self.params['memory_capacity'], n_seed=self.seed),
-                        'sl':  Memory(self.params['memory_capacity'], n_seed=self.seed)
+                        'sl':  Memory(self.params['memory_capacity'], n_seed=self.seed),
+                        'cl':  Memory(self.params['memory_capacity'], n_seed=self.seed)
                     }    
     
     def memorize(self, event, learning_type, init=False):
@@ -185,8 +185,19 @@ class Agent:
         else:
             self.memory[learning_type].store(event.tolist())
     
+    def act(self, state, task, learning_type, explore=True):
+        if learning_type == 'sl':
+            A = task
+        # elif learning_type == 'cl':
+        #     S = self.concept_inference(s[self.n_dims_excluded:], explore=explore)
+        #     A = self.high_level_decision(task, S, explore=explore)            
+        s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:-self.dim_excluded['last']]).to(device)
+        with torch.no_grad():
+            a = self.actor.sample_action(s_cuda, A, explore=explore)
+            return a
+    
     def learn_skills(self, only_metrics=False):
-        batch = self.memory['cl'].sample(self.batch_size['cl'])
+        batch = self.memory['sl'].sample(self.batch_size['sl'])
         batch = np.array(batch)
         batch_size = batch.shape[0]
 
@@ -196,55 +207,55 @@ class Agent:
             r_batch = torch.FloatTensor(batch[:,self.sa_dim]).view(-1,1).to(device)
             ns_batch = torch.FloatTensor(batch[:,self.sa_dim+1+self.dim_excluded['init']:self.sars_dim-self.dim_excluded['last']]).to(device)
             d_batch = torch.FloatTensor(batch[:,self.sars_dim]).view(-1,1).to(device)
-            T_batch = batch[:,self.sarsd_dim+1].astype('int')  
+            T_batch = batch[:,self.sarsd_dim].astype('int')  
 
             if not only_metrics:
                 # Optimize q networks
-                q1 = self.critic1['cl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                q2 = self.critic2['cl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                next_v = self.v_target['cl'](ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                q1 = self.critic1['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                q2 = self.critic2['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                next_v = self.v_target['sl'](ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
                 q_approx = r_batch + self.gamma * next_v * (1-d_batch)
                 
-                q1_loss = self.critic1['cl'].loss_func(q1, q_approx.detach())
-                self.critic1['cl'].optimizer.zero_grad()
+                q1_loss = self.critic1['sl'].loss_func(q1, q_approx.detach())
+                self.critic1['sl'].optimizer.zero_grad()
                 q1_loss.backward()
-                clip_grad_norm_(self.critic1['cl'].parameters(), self.clip_value)
-                self.critic1['cl'].optimizer.step()
+                clip_grad_norm_(self.critic1['sl'].parameters(), self.clip_value)
+                self.critic1['sl'].optimizer.step()
                 
-                q2_loss = self.critic2['cl'].loss_func(q2, q_approx.detach())
-                self.critic2['cl'].optimizer.zero_grad()
+                q2_loss = self.critic2['sl'].loss_func(q2, q_approx.detach())
+                self.critic2['sl'].optimizer.zero_grad()
                 q2_loss.backward()
-                clip_grad_norm_(self.critic2['cl'].parameters(), self.clip_value)
-                self.critic2['cl'].optimizer.step()                
+                clip_grad_norm_(self.critic2['sl'].parameters(), self.clip_value)
+                self.critic2['sl'].optimizer.step()                
 
             # Optimize v network
             a_batch_A, log_pa_sApT_A = self.actor.sample_actions_and_llhoods_for_all_skills(s_batch)
             a_batch = a_batch_A[np.arange(batch_size), T_batch, :]
-            log_pa_sT = log_pa_sApT_A[:, :, T_batch]
+            log_pa_sT = log_pa_sApT_A[np.arange(batch_size), :, T_batch]
             
-            q1_off = self.critic1['cl'](s_batch.detach(), a_batch)
-            q2_off = self.critic2['cl'](s_batch.detach(), a_batch)
+            q1_off = self.critic1['sl'](s_batch.detach(), a_batch)
+            q2_off = self.critic2['sl'](s_batch.detach(), a_batch)
             q_off = torch.min(torch.stack([q1_off, q2_off]), 0)[0]
             
             v_approx = (q_off - self.alpha.view(1,-1) * log_pa_sT)[np.arange(batch_size), T_batch].view(-1,1) 
 
             if not only_metrics:
-                v = self.v['cl'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                v = self.v['sl'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
             
-            task_mask = torch.zeros(batch_size, self.n_tasks).float().to(device)
+            task_mask = torch.zeros(batch_size, self.n_tasks['sl']).float().to(device)
             task_mask[np.arange(batch_size), T_batch] = torch.ones(batch_size).float().to(device)
             task_count = task_mask.sum(0).view(-1,1)
             task_mask_distribution = task_mask / (task_count.view(1,-1) + 1e-10)
-            Ha_sT = -(log_pa_sT * task_mask_distribution).sum(0, keepdim=True)
+            Ha_sT = -(log_pa_sT * task_mask_distribution).sum(0)
             alpha_gradient = Ha_sT.detach() - self.threshold_entropy_alpha
 
             if not only_metrics:
                 v_loss = ((v - v_approx.detach())**2).mean()
-                self.v['cl'].optimizer.zero_grad()
+                self.v['sl'].optimizer.zero_grad()
                 v_loss.backward()
-                clip_grad_norm_(self.v['cl'].parameters(), self.clip_value)
-                self.v['cl'].optimizer.step()
-                updateNet(self.v_target['cl'], self.v['cl'], self.lr['cl']['v_target'])
+                clip_grad_norm_(self.v['sl'].parameters(), self.clip_value)
+                self.v['sl'].optimizer.step()
+                updateNet(self.v_target['sl'], self.v['sl'], self.lr['sl']['v_target'])
 
                 # Optimize skill network
                 pi_loss = (-v_approx).mean()
@@ -255,7 +266,7 @@ class Agent:
 
                 # Optimize dual variable                
                 log_alpha = torch.log(self.alpha + 1e-6)
-                log_alpha -= self.lr['cl']['alpha'] * alpha_gradient
+                log_alpha -= self.lr['sl']['alpha'] * alpha_gradient
                 self.alpha = torch.exp(log_alpha).clamp(1e-10, 1e+3)
 
                 self.threshold_entropy_alpha = np.max([self.threshold_entropy_alpha - self.delta_threshold_entropy_alpha, self.min_threshold_entropy_alpha])
@@ -266,10 +277,15 @@ class Agent:
             
         if only_metrics:
             metrics = {
-                        'H(a|sT)': Ha_sT.mean().detach().cpu().numpy()                
+                        'H(a|s,T)': Ha_sT.mean().detach().cpu().numpy()                
                     }            
             return metrics
     
+    def estimate_metrics(self, learning_type):
+        with torch.no_grad():
+            skill_metrics = self.learn_skills(only_metrics=True)
+            metrics = skill_metrics if learning_type == 'sl' else {}
+        return metrics
     
     def save(self, common_path, specific_path, learning_type):
         self.params['alpha'] = self.alpha
@@ -289,11 +305,11 @@ class Agent:
         torch.save(self.critic2[learning_type].state_dict(), specific_path+'_critic2_'+learning_type+'.pt')
         torch.save(self.v[learning_type].state_dict(), specific_path+'_v_'+learning_type+'.pt')
         torch.save(self.v_target[learning_type].state_dict(), specific_path+'_v_target_'+learning_type+'.pt')
-        if learning_type == 'cl':
+        if learning_type == 'sl':
             torch.save(self.actor.state_dict(), specific_path+'_actor.pt')        
                 
     
-    def load(self, common_path, specific_path, learning_type, load_memory=True, load_upper_memory=True):
+    def load(self, common_path, specific_path, learning_type, load_memory=True):
         if load_memory: 
             data_batches = pickle.load(open(common_path+'/data_batches_'+learning_type+'.p','rb'))
             pointer = 0
@@ -301,7 +317,7 @@ class Agent:
                 data = pickle.load(open(common_path+'/memory_'+learning_type+str(i+1)+'.p','rb'))
                 self.memory[learning_type].data += data
                 pointer += len(data)
-            self.memory.pointer = pointer % self.memory[learning_type].capacity
+            self.memory[learning_type].pointer = pointer % self.memory[learning_type].capacity
 
         self.actor.load_state_dict(torch.load(specific_path+'_actor.pt'))
         self.actor.eval()
@@ -334,10 +350,18 @@ class System:
                             'grad_steps': 1, 
                             'init_steps': 10000,
                             'max_episode_steps': 1000,
+                            'tr_steps_sl': 1000,
+                            'tr_steps_cl': 1000,
+                            'tr_epsd_sl': 1000,
+                            'tr_epsd_cl': 1000,
+                            'eval_epsd_sl': 2,
+                            'eval_epsd_interval': 10,
+                            'eval_epsd_cl': 2,
                             'batch_size': 256, 
                             'render': True, 
                             'reset_when_done': True, 
-                            'store_video': False                            
+                            'store_video': False,
+                            'storing_path': ''                           
                         }
 
         for key, value in default_params.items():
@@ -356,10 +380,28 @@ class System:
                             'cl': len(self.env_names['cl']),
                             'tl': len(self.env_names['tl'])
                         }
+        self.steps = {
+                        'env': self.params['env_steps'],
+                        'grad': self.params['grad_steps'],
+
+                        'init': self.params['init_steps'],
+                        'tr': {
+                                'sl': self.params['tr_steps_sl'],
+                                'cl': self.params['tr_steps_cl']
+                            }
+                    }
+        self.epsds = {
+            'tr': {
+                'sl': self.params['tr_epsd_sl'],
+                'cl': self.params['tr_epsd_cl']
+            },
+            'eval': {
+                'sl': self.params['eval_epsd_sl'],
+                'cl': self.params['eval_epsd_cl'],
+                'interval': self.params['eval_epsd_interval']
+            },
+        }
        
-        self.env_steps = self.params['env_steps']
-        self.grad_steps = self.params['grad_steps']
-        self.init_steps = self.params['init_steps']
         self.batch_size = self.params['batch_size']
         self.render = self.params['render']
         self.store_video = self.params['store_video']
@@ -367,264 +409,208 @@ class System:
         self._max_episode_steps = self.params['max_episode_steps']
 
         self.envs = {}
+        self.learning_type = 'sl'
 
-        self.set_envs('sl')
+        self.set_envs()
 
-        self.s_dim = self.envs['sl'][0].observation_space.shape[0]
-        self.a_dim = self.envs['sl'][0].action_space.shape[0]        
+        self.s_dim = self.envs[self.learning_type][0].observation_space.shape[0]
+        self.a_dim = self.envs[self.learning_type][0].action_space.shape[0]        
         self.sa_dim = self.s_dim + self.a_dim
         self.sars_dim = self.s_dim*2 + self.a_dim + 1
         self.sarsd_dim = self.sars_dim + 1
-        self.t_dim = self.sarsd_dim + 2
+        self.t_dim = self.sarsd_dim + 1
         self.epsd_counter = 0
         self.task = 0
 
-        self.min_action = self.envs['sl'][0].action_space.low[0]
-        self.max_action = self.envs['sl'][0].action_space.high[0]
+        self.min_action = self.envs[self.learning_type][0].action_space.low[0]
+        self.max_action = self.envs[self.learning_type][0].action_space.high[0]
 
         self.agent = Agent(self.s_dim, self.a_dim, self.n_tasks, agent_params, seed=self.seed) 
 
-    def set_envs(self, learning_type):
-        self.envs[learning_type] = []        
-        for i in range(0, self.n_tasks[learning_type]):                    
-            self.envs[learning_type].append(gym.make(self.env_names[learning_type][i]).unwrapped)
-            print("Created env "+self.env_names[learning_type][i])
-            self.envs[learning_type][i].reset()
-            self.envs[learning_type][i].seed(self.seed)        
-            self.envs[learning_type][i]._max_episode_steps = self._max_episode_steps
-            self.envs[learning_type][i].rgb_rendering_tracking = True
+    def set_envs(self):
+        self.envs[self.learning_type] = []        
+        for i in range(0, self.n_tasks[self.learning_type]):                    
+            self.envs[self.learning_type].append(gym.make(self.env_names[self.learning_type][i]).unwrapped)
+            print("Created env "+self.env_names[self.learning_type][i])
+            self.envs[self.learning_type][i].reset()
+            self.envs[self.learning_type][i].seed(self.seed)        
+            self.envs[self.learning_type][i]._max_episode_steps = self._max_episode_steps
+            self.envs[self.learning_type][i].rgb_rendering_tracking = True
     
-    @property
-    def task_modulo(self):
-        modulo = self.n_tasks
-        if self.epsd_counter < self.basic_epsds:
-            modulo = self.n_basic_tasks
-        return modulo
-
-    def reset(self, change_env=False):        
-        if self.embedded_envs:
-            if self.env_names[self.task] == 'Pendulum-v0' and self.hard_start:
-                self.envs[self.task].state = np.array([-np.pi,0.0])
-            else:
-                self.envs[self.task].reset()
-                self.task = self.envs[0]._task
-        else:
-            if change_env:
-                self.task = (self.task+1) % self.task_modulo
-            if self.env_names[self.task] == 'Pendulum-v0' and self.hard_start:
-                self.envs[self.task].state = np.array([-np.pi,0.0])
-            else:
-                self.envs[self.task].reset()
-            
-            self.agent.reset_upper_level()
+    def reset(self, change_env=False):
+        # self.envs[self.learning_type][self.task].close()        
+        if change_env: self.task = (self.task+1) % self.n_tasks[self.learning_type]
+        self.envs[self.learning_type][self.task].reset()        
     
     def get_obs(self):
-        if self.original_state:
-            state = self.envs[self.task]._get_obs().copy()
-        else:
-            if self.env_names[self.task] == 'Pendulum-v0':            
-                state = self.envs[self.task].state.copy().reshape(-1) 
-                state[0] = normalize_angle(state[0])
-            elif self.env_names[self.task] == 'Ant-v3':
-                state = self.envs[self.task]._get_obs()[:28]
+        state = self.envs[self.learning_type][self.task]._get_obs().copy()
         return state
-
      
-    def initialization(self, epsd_steps):         
+    def initialization(self, init_steps=0):         
         self.reset()
-        self.epsd_counter += 1
-        total_r = 0.0
-        epsd_step = 0
-        for init_step in range(0, self.init_steps):
-            epsd_step += 1           
-            event = self.interaction_init(epsd_step)
-            r = event[self.sa_dim]
-            done = event[self.sars_dim]
-            total_r += r/self.n_tasks
-            if done or (init_step+1) % (self.init_steps//self.n_tasks) == 0:
-                epsd_step = 0
-                self.reset(change_env=True)
-            if self.render:
-                self.envs[self.task].render()                        
-        print("Finished initialization, av. reward = %.4f" % (total_r))
+        if init_steps == 0: init_steps = self.steps['init']
+        for init_step in range(0, init_steps * self.n_tasks[self.learning_type]):
+            done = self.interaction_init()
+            limit_reached = (init_step+1) % init_steps == 0
+            if done or limit_reached: self.reset(change_env=limit_reached)
+            if self.render: self.envs[self.learning_type][self.task].render()                        
+        print("Finished initialization...")
 
-    def interaction_init(self, epsd_step):  
+    def interaction_init(self):  
         event = np.empty(self.t_dim)
         state = self.get_obs()
-        action = self.agent.act(state, self.task, explore=True)[0]
-        scaled_action = scale_action(action, self.min_action, self.max_action).reshape(-1)
-        reward, done = self.envs[self.task].step(scaled_action)[1:3]  
+        action = 2.0*np.random.rand(self.a_dim)-1.0
+        next_state, reward, done = self.envs[self.learning_type][self.task].step(action)[:3]  
         done = done and self.reset_when_done
-        next_state = self.get_obs()
         
         event[:self.s_dim] = state
         event[self.s_dim:self.sa_dim] = action
         event[self.sa_dim] = reward
         event[self.sa_dim+1:self.sars_dim] = next_state
         event[self.sars_dim] = float(done)
-        event[self.sarsd_dim+1] = self.task
-        
-        if self.multitask:
-            event[self.sarsd_dim] = reward # info['reward_goal']  
-        else:
-            event[self.sarsd_dim] = reward
-        
-        self.agent.memorize(event)   
-        return event
+        event[self.sarsd_dim] = self.task
 
-    def interaction(self, learn_upper=True, remember=True, init=False, explore=True, epsd_step=0, learn_lower=True, transfer=False):  
+        self.agent.memorize(event, self.learning_type)   
+        return done
+
+    def interaction_skills(self, remember=True, explore=True, learn=True):  
         event = np.empty(self.t_dim)
         state = self.get_obs()
+        total_reward = 0.0
 
-        for env_step in range(0, self.env_steps):
-            action, action_llhood = self.agent.act(state, self.task, explore=explore)
+        for env_step in range(0, self.steps['env']):
+            action = self.agent.act(state, self.task, self.learning_type, explore=explore)
             scaled_action = scale_action(action, self.min_action, self.max_action).reshape(-1)
-            _, reward, done, info = self.envs[self.task].step(scaled_action)
-            # if (epsd_step*self.env_steps+1) >= 1000:
-            #     print("Done "+str(done))
-            done = done and self.reset_when_done # must be changed if done == True when time == max_time
-            next_state = self.get_obs()                            
-
+            next_state, reward, done, _ = self.envs[self.learning_type][self.task].step(scaled_action)
+            done = done and self.reset_when_done
+            total_reward += reward
+            
             event[:self.s_dim] = state
             event[self.s_dim:self.sa_dim] = action
             event[self.sa_dim] = reward
             event[self.sa_dim+1:self.sars_dim] = next_state
             event[self.sars_dim] = float(done)
-            event[self.sarsd_dim+1] = self.task
+            event[self.sarsd_dim] = self.task
         
-            assert isinstance(reward, float), "problems in paradise"
-
-            if self.multitask:
-                event[self.sarsd_dim] = reward # info['reward_goal']                  
-            else:
-                event[self.sarsd_dim] = reward    
-            
-            if remember:
-                self.agent.memorize(event)
-
-            if self.hierarchical:
-                self.agent.update_upper_level(reward, done, self.task, (epsd_step*self.env_steps+env_step+1)>=self.envs[self.task]._max_episode_steps, 
-                    state, action, action_llhood, remember=remember, learn=learn_upper, transfer=transfer)
-
-            if done:                
-                break
-
-            if env_step < self.env_steps-1:
-                state = np.copy(next_state)
+            if remember: self.agent.memorize(event.copy(), self.learning_type)
+            if done: break
+            if env_step < self.steps['env']-1: state = np.copy(next_state)
         
-        if learn_lower and not init:
-            for _ in range(0, self.grad_steps):
-                self.agent.learn_lower()
+        if learn:
+            for _ in range(0, self.steps['grad']):
+                self.agent.learn_skills()
 
-        return event, done
+        return total_reward, done, event
 
-    def train(self):
-        pass
-    
-    def train_agent(self, tr_epsds, epsd_steps, initialization=True, eval_epsd_interval=10, eval_epsds=12, iter_=0, save_progress=True, common_path='', 
-        rewards=[], goal_rewards=[], metrics=[], learn_lower=True, transfer=False, model_iter=10000, model_epsd_interval=10):        
-        if self.render:
-            self.envs[self.task].render()
+    def train_agent(self, initialization=True, storing_path='', rewards=[], metrics=[]):
+        if len(storing_path) == 0: storing_path = self.params['storing_path']
 
         if initialization:
-            self.initialization(epsd_steps)
+            self.initialization()
+            specific_path = storing_path + '/' + str(0)
+            self.save(storing_path, specific_path)
+        
+        self.train_agent_skills(storing_path=storing_path, rewards=rewards, metrics=metrics)
+    
+    def train_agent_skills(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
+        if self.render: self.envs[self.learning_type][self.task].render()         
 
-            stdscr = curses.initscr()
-            curses.noecho()
-            curses.cbreak()
-
-            for i in range(0, 10*model_iter):
-                self.agent.learn_transition_model(i, stdscr)
-
-            curses.echo()
-            curses.nocbreak()
-            curses.endwin()
-
-            specific_path = common_path + '/' + str(0)
-            self.save(common_path, specific_path)
-
-        n_done = 0
-
-        for epsd in range(0, tr_epsds):
-            self.epsd_counter += 1
-            if epsd == 0:
-                self.reset(change_env=False)
-            else:
-                self.reset(change_env=True)
+        for epsd in range(0, self.epsds['tr'][self.learning_type]):
+            change_env = False if epsd == 0 else True
+            self.reset(change_env=change_env)
+            iter_ = iter_0 + (epsd+1) // self.epsds['eval']['interval']
             
-            for epsd_step in range(0, epsd_steps):
-                if len(self.agent.memory.data) < self.batch_size:
-                    done = self.interaction(learn_upper=False, learn_lower=False, epsd_step=epsd_step, transfer=transfer)[1]
+            for epsd_step in range(0, self.steps['tr'][self.learning_type]):
+                if self.agent.memory[self.learning_type].len_data < self.batch_size:
+                    done = self.interaction_skills(learn=False)[1]
                 else:
-                    done = self.interaction(learn_upper=True, learn_lower=learn_lower, epsd_step=epsd_step, transfer=transfer)[1]
+                    done = self.interaction_skills(learn=True)[1]
 
-                if self.render:
-                    self.envs[self.task].render()
+                if self.render: self.envs[self.learning_type][self.task].render()
 
-                if done:
-                    n_done += 1
-                    self.reset(change_env=False)
-                
-                if n_done >= 5:
-                    current_task = self.task
-                    self.eval_agent(1, act_randomly=False, iter_=iter_, print_space=False)
-                    self.reset()
-                    self.task = current_task
-                    n_done = 0
-            
-            if (epsd+1) % eval_epsd_interval == 0:
-                if self.hierarchical:
-                    if self.multitask:
-                        r, gr, _, m = self.eval_agent(eval_epsds, act_randomly=False, iter_=iter_ + (epsd+1) // eval_epsd_interval)[:4]
-                        goal_rewards.append(gr)
-                        if save_progress:
-                            np.savetxt(common_path + '/mean_rewards_goal.txt', np.array(goal_rewards))
-                    else:
-                        r, _, m = self.eval_agent(eval_epsds, act_randomly=False, iter_=iter_ + (epsd+1) // eval_epsd_interval)[:3]
-                    metrics.append(m)
-                    if save_progress:
-                        np.savetxt(common_path + '/metrics.txt', np.array(metrics))
-                else:
-                    if self.multitask:
-                        r, gr = self.eval_agent(eval_epsds, act_randomly=False, iter_=iter_ + (epsd+1) // eval_epsd_interval)[:2]
-                        goal_rewards.append(gr)
-                        if save_progress:
-                            np.savetxt(common_path + '/mean_rewards_goal.txt', np.array(goal_rewards))
-                    else:
-                        rewards.append(self.eval_agent(eval_epsds, act_randomly=False, iter_=iter_ + (epsd+1) // eval_epsd_interval)[0])
+                if done: self.reset(change_env=False)
+
+            if (epsd+1) % self.epsds['eval']['interval'] == 0:                
+                r, _, m = self.eval_agent_skills(explore=False, iter_=iter_)[:3]
+                metrics.append(m)
                 rewards.append(r)
-                if save_progress:
-                    specific_path = common_path + '/' + str(iter_ + (epsd+1) // eval_epsd_interval)
-                    self.save(common_path, specific_path)
-                    np.savetxt(common_path + '/mean_rewards.txt', np.array(rewards))
+                np.savetxt(storing_path + '/metrics.txt', np.array(metrics))               
+                
+            specific_path = storing_path + '/' + str(iter_)
+            self.save(storing_path, specific_path)
+            np.savetxt(storing_path + '/mean_rewards.txt', np.array(rewards))
+
+    def train_agent_concepts(self):
+        pass
+
+    def eval_agent_skills(self, eval_epsds=0, explore=False, iter_=0, start_render=False, print_space=True, specific_path='video', max_epsd=0):   
+        task = self.task
+        self.task = 0
+        self.reset()
+
+        if start_render: self.envs[self.learning_type][self.task].render()
+        if eval_epsds == 0: eval_epsds = self.epsds['eval'][self.learning_type] * self.n_tasks[self.learning_type]
+        
+        events = []
+        rewards = []
+        epsd_lenghts = []
+        min_epsd_reward = 1.0e6
+        max_epsd_reward = -1.0e6
+                
+        Ha_sT = []
+        Ha_sT_average = 0.0
+        
+        for epsd in range(0, eval_epsds):
+
+            if self.store_video: video = VideoWriter(specific_path + '_' + str(self.task) + '_[0' + str(epsd) + '.avi', fourcc, float(FPS), (width, height))
+
+            change_env = False if epsd == 0 else True
+            self.reset(change_env=change_env)            
+            if max_epsd <= 0: max_epsd = self.envs[self.learning_type][self.task]._max_episode_steps
+            epsd_reward = 0.0
+
+            for eval_step in itertools.count(0):            
+                reward, done, event = self.interaction_skills(explore=explore, learn=False)
+                event[self.sa_dim] = reward  
+                epsd_reward += reward              
+
+                if self.store_video:
+                    img = self.envs[self.learning_type][self.task].render('rgb_array',1024,768)
+                    video.write(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                elif self.render:
+                    self.envs[self.learning_type][self.task].render()
+
+                events.append(event)
+
+                if done or (eval_step + 1 >= max_epsd):
+                    epsd_lenghts.append(eval_step + 1)
+                    break
+
+            metrics = self.agent.estimate_metrics(self.learning_type)                
+            Ha_sT.append(metrics['H(a|s,T)'])
+
+            rewards.append(epsd_reward)
+            min_epsd_reward = np.min([epsd_reward, min_epsd_reward])
+            max_epsd_reward = np.max([epsd_reward, max_epsd_reward])
+            average_reward = np.array(rewards).mean()
             
-            if (epsd+1) % model_epsd_interval == 0:
-                if self.hierarchical:
-                    stdscr = curses.initscr()
-                    curses.noecho()
-                    curses.cbreak()
+            Ha_sT_average += (Ha_sT[-1] - Ha_sT_average)/(epsd+1)
+            
+            stdout.write("Iter %i, epsd %i, H(a|s,T): %.4f, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
+                (iter_, (epsd+1), Ha_sT_average, min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
+            stdout.flush()         
 
-                    for i in range(0, model_iter):
-                        self.agent.learn_transition_model(i, stdscr)
+        if print_space: print("")
 
-                    curses.echo()
-                    curses.nocbreak()
-                    curses.endwin()
-
-                    if save_progress:
-                        specific_path = common_path + '/' + str(iter_ + (epsd+1) // eval_epsd_interval)
-                        self.save(common_path, specific_path)
-                        np.savetxt(common_path + '/mean_rewards.txt', np.array(rewards))
-              
-        if self.multitask:
-            return np.array(rewards).reshape(-1), np.array(goal_rewards).reshape(-1)
-        else:      
-            return np.array(rewards).reshape(-1)      
+        if self.store_video: video.release()
+        metric_vector = np.array([Ha_sT_average])
+        self.task = task
+        return rewards, np.array(events), metric_vector, np.array(epsd_lenghts)      
     
     def save(self, common_path, specific_path):
-        pickle.dump(self.params,open(common_path+'/params.p','wb'))
-        self.agent.save(common_path, specific_path)
+        pickle.dump(self.params, open(common_path+'/params.p','wb'))
+        self.agent.save(common_path, specific_path, self.learning_type)
     
-    def load(self, common_path, specific_path, load_memory=True, load_upper_memory=True, transfer=False):
-        self.agent.load(common_path, specific_path, load_memory=load_memory, load_upper_memory=load_upper_memory, transfer=transfer)
+    def load(self, common_path, specific_path, load_memory=True):
+        self.agent.load(common_path, specific_path, self.learning_type, load_memory=load_memory)
 
