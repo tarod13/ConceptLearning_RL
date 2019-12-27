@@ -75,7 +75,7 @@ class Memory:
 #
 #-------------------------------------------------------------
 class v_valueNet(nn.Module):
-    def __init__(self, input_dim, n_tasks=1, lr=3e-4, init_method='glorot'):
+    def __init__(self, input_dim, n_tasks, lr=3e-4, init_method='glorot'):
         super().__init__()        
         self.l1 = nn.Linear(input_dim, 256)
         self.l2 = nn.Linear(256, 256)
@@ -98,7 +98,7 @@ class v_valueNet(nn.Module):
         return(x)
 
 class q_valueNet(nn.Module):
-    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, init_method='glorot'):
+    def __init__(self, s_dim, a_dim, n_tasks, lr=3e-4, init_method='glorot'):
         super().__init__()        
         self.l1 = nn.Linear(s_dim+a_dim, 256)
         self.l2 = nn.Linear(256, 256)
@@ -217,20 +217,6 @@ class rNet(nn.Module):
         r = m + stdev*torch.randn_like(m)
         return r, m, log_stdev, stdev
 
-    # def sample_and_cross_llhood(self, s, T):
-    #     r, m, log_stdev, stdev = self.sample(s)
-    #     r = r.detach()[np.arange(s.size(0)), T, :].unsqueeze(1).unsqueeze(3)
-    #     m = m[np.arange(s.size(0)), T, :].unsqueeze(0).unsqueeze(2)
-        
-    #     if self.log_func == 'self':
-    #         log_stdev = log_stdev[np.arange(s.size(0)), T, :].unsqueeze(0).unsqueeze(2)
-    #         cross_llhood = gaussian_likelihood(r, m, log_stdev, self.EPS_sigma)
-    #     elif self.log_func == 'torch':
-    #         stdev = stdev[np.arange(s.size(0)), T, :].unsqueeze(0).unsqueeze(2)
-    #         cross_llhood = Normal(m, stdev).log_prob(r)        
-
-    #     return cross_llhood
-    
     def llhood(self, r, s, T, cross=False):
         m, log_stdev = self(s)        
         # z = torch.zeros(s.size(0),1).to(device)
@@ -263,35 +249,6 @@ class rNet(nn.Module):
         # assert llhood.size(1) == 1, 'Wrong size'
         # return log_unnormalized_posterior
         return llhood
-
-    # def llhood(self, s, r, t):
-    #     m, log_stdev = self(s)
-    #     stdev = torch.exp(log_stdev)
-    #     m_task = m[np.arange(s.size(0)), t].view(-1,1)
-    #     log_stdev_task = log_stdev[np.arange(s.size(0)), t].view(-1,1)
-    #     stdev_task = stdev[np.arange(s.size(0)), t].view(-1,1)
-
-    #     # assert stdev.size(1) == 1, 'Wrong size'
-    #     r_repeated = r.view(1,1,r.size(0)).repeat(1,self.n_tasks,1)
-    #     m_repeated = m.view(s.size(0),-1,1).repeat(1,1,r.size(0))
-    #     if self.log_func == 'self':
-    #         llhood = gaussian_likelihood(r, m_task, log_stdev_task, self.EPS_sigma)
-
-    #         log_stdev_repeated = log_stdev.view(s.size(0),-1,1).repeat(1,1,r.size(0))
-    #         cross_llhood = gaussian_likelihood(r_repeated, m_repeated, log_stdev_repeated, self.EPS_sigma)
-
-    #     elif self.log_func == 'torch':
-    #         llhood = Normal(m_task, stdev_task).log_prob(r)
-
-    #         stdev_repeated = stdev.view(s.size(0),-1,1).repeat(1,1,r.size(0))
-    #         cross_llhood = Normal(m_repeated, stdev_repeated).log_prob(r_repeated)
-        
-
-    #     assert torch.all(llhood==llhood), 'Invalid memb llhoods'
-
-    #     assert llhood.size(1) == 1, 'Wrong size'
-
-    #     return llhood, cross_llhood, m, log_stdev
 
 class rewardNet(nn.Module):
     def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, init_method='glorot'):
@@ -404,106 +361,6 @@ class SimPLe_encoderNet(nn.Module):
         
         return z, mean, log_stdev
 
-# class SimPLe_encoderNet(nn.Module):
-#     def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4):
-#         super().__init__()    
-
-#         self.min_log_stdev = -4
-#         self.max_log_stdev = 4  
-        
-#         self.l1 = parallel_Linear_simple(n_tasks, 2*s_dim+a_dim, s_dim)
-#         self.l2 = parallel_Linear(n_tasks, s_dim, s_dim//2+1)
-#         self.l3 = parallel_Linear(n_tasks, s_dim//2+1, s_dim//4+1)
-#         # self.l32 = parallel_Linear(n_tasks, s_dim//2+1, s_dim//4+1)
-
-#         self.d = nn.Dropout(0.2)
-                
-#         self.apply(weights_init_)
-
-#     def forward(self, s, a, ns):
-#         x = torch.cat([s,a,ns],1)
-#         x = F.relu(self.l1(x))
-#         x = F.relu(self.l2(x))
-#         x = self.l31(x)
-#         xn = x + torch.randn_like(x)
-#         x1 = (1.2*torch.sigmoid(xn)-0.1).clamp(0.0,1.0)
-#         x2 = xn < 0.0
-#         x2 += x1 - x1.detach()
-
-#         r = np.random.rand()
-#         if r > 0.5:
-#             xd = x1
-#         else:
-#             xd = x2 
-#         xd = self.d(xd)
-
-#         return xd  
-
-# class SimPLe_decoderNet(nn.Module):
-#     def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4):
-#         super().__init__()      
-        
-#         self.l11 = parallel_Linear_simple(n_tasks, s_dim-40, (5*(s_dim-40))//6+1)
-#         self.l12 = parallel_Linear_simple(n_tasks, 20, 10)
-#         self.l13 = parallel_Linear_simple(n_tasks, 20, 10)
-#         self.l21 = parallel_Linear(n_tasks, (5*(s_dim-40))//6+1, (3*(s_dim-40))//4+1)
-#         self.l22 = parallel_Linear(n_tasks, 10, 5)
-#         self.l23 = parallel_Linear(n_tasks, 10, 5)
-#         self.l3 = parallel_Linear(n_tasks, (3*(s_dim-40))//4+11, s_dim//2+1)
-#         self.l4 = parallel_Linear(n_tasks, s_dim//2+1+a_dim+s_dim//4+1, (3*s_dim)//4+1)
-#         self.l5 = parallel_Linear(n_tasks, (3*s_dim)//4+1+a_dim, (5*s_dim)//6+1)
-#         self.l61 = parallel_Linear(n_tasks, (5*s_dim)//6+1+a_dim, s_dim)
-#         self.l62 = parallel_Linear(n_tasks, (5*s_dim)//6+1+a_dim, 1)
-                
-#         self.apply(weights_init_)
-    
-#     def forward(self, s, a, z, min_, max_):       
-#         x1 = F.relu(self.l11(s[:,:-40]))
-#         x2 = F.relu(self.l12(s[:,-40:-20]))
-#         x3 = F.relu(self.l13(s[:,-20:]))
-#         x1 = F.relu(self.l21(x1))
-#         x2 = F.relu(self.l22(x2))
-#         x3 = F.relu(self.l23(x3))
-#         x = torch.cat([x1,x2,x3y],2)
-#         x = F.relu(self.l3(x))
-#         x = torch.cat([x,z,a],2)
-#         x = F.relu(self.l4(x))
-#         x = torch.cat([x,a],2)
-#         x = F.relu(self.l5(x))
-#         x = torch.cat([x,a],2)
-#         # ns = 0.5*(torch.tanh(self.l61(x))+1) * (max_ - min_).view(1,1,-1).abs() + min_.view(1,1,-1)
-#         ns = self.l61(x)
-#         r = self.l62(x)
-#         return ns, r
-
-# class SimPLe_decoderNet(nn.Module):
-#     def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4):
-#         super().__init__()      
-        
-#         self.l1 = parallel_Linear_simple(n_tasks, s_dim, (5*s_dim)//6+1)
-#         self.l2 = parallel_Linear(n_tasks, (5*s_dim)//6+1, (3*s_dim)//4+1)
-#         self.l3 = parallel_Linear(n_tasks, (3*s_dim)//4+1, s_dim//2+1)
-#         self.l4 = parallel_Linear(n_tasks, s_dim//2+1+a_dim+s_dim//4+1, (3*s_dim)//4+1)
-#         self.l5 = parallel_Linear(n_tasks, (3*s_dim)//4+1+a_dim, (5*s_dim)//6+1)
-#         self.l61 = parallel_Linear(n_tasks, (5*s_dim)//6+1+a_dim, s_dim)
-#         self.l62 = parallel_Linear(n_tasks, (5*s_dim)//6+1+a_dim, 1)
-                
-#         self.apply(weights_init_)
-    
-#     def forward(self, s, a, z, min_, max_):       
-#         x = F.relu(self.l1(s))
-#         x = F.relu(self.l2(x))
-#         x = F.relu(self.l3(x))
-#         x = torch.cat([x,z,a],2)
-#         x = F.relu(self.l4(x))
-#         x = torch.cat([x,a],2)
-#         x = F.relu(self.l5(x))
-#         x = torch.cat([x,a],2)
-#         # ns = 0.5*(torch.tanh(self.l61(x))+1) * (max_ - min_).view(1,1,-1).abs() + min_.view(1,1,-1)
-#         ns = self.l61(x)
-#         r = self.l62(x)
-#         return ns, r
-
 class SimPLe_decoderNet(nn.Module):
     def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, latent_dim=0):
         super().__init__()      
@@ -527,14 +384,7 @@ class SimPLe_decoderNet(nn.Module):
         self.l36 = parallel_Linear(n_tasks, dim2, dim2)
         self.l58 = parallel_Linear(n_tasks, dim3, dim3)
 
-        # self.l_latent = parallel_Linear(n_tasks, latent_dim, dim2)
         self.l_reward = parallel_Linear(n_tasks, s_dim+a_dim+dim4+latent_dim, 1)
-
-        # self.l1 = parallel_Linear(n_tasks, s_dim+a_dim+latent_dim, 256)
-        # self.l2 = parallel_Linear(n_tasks, 256, 256)
-        # self.l3 = parallel_Linear(n_tasks, 256, s_dim)
-
-        # self.l_reward = parallel_Linear(n_tasks, 256, 1)
 
         self.bn = nn.BatchNorm1d(n_tasks)
         self.d = nn.Dropout(0.2)
@@ -771,7 +621,7 @@ class ConditionalSimPLe_decoderNet(nn.Module):
         return ns, r
 
 class ConditionalSimPLeNet(nn.Module):
-    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, beta=1.0e2, max_C=10*np.log(2), delta_C=np.log(2)*1.0e-4, reward_weight=1.0, C_0=0.0, distribution_type='discrete', alpha=0.99):
+    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, beta=1.0e2, max_C=10*np.log(2), delta_C=np.log(2)*1.0e-4, reward_weight=10.0, C_0=0.0, distribution_type='discrete', alpha=0.99):
         super().__init__()      
         
         self.encoder = ConditionalSimPLe_encoderNet(s_dim, a_dim, n_tasks=n_tasks, lr=lr, distribution_type=distribution_type)
@@ -885,39 +735,50 @@ class ConditionalVQVAE_encoderNet(nn.Module):
         self.kinematic_dim = s_dim - vision_dim*vision_channels     
         
         nc1 = vision_channels * 2
-        nc2 = vision_channels * 3
-        nc3 = vision_channels * 4
+        nc2 = vision_channels * 4
+        nc3 = vision_channels * 8
+        nc4 = vision_channels * 16
 
-        kernel_size = 2
-        stride1 = 2
-        stride2 = 2
-        stride3 = 1
+        kernel_size1 = 4
+        kernel_size2 = 4
+        kernel_size3 = 3
+        kernel_size4 = 3
+
+        dilation1 = 1
+        dilation2 = 2
+        dilation3 = 1
+        dilation4 = 2
         
-        k_dim1 = (2*self.kinematic_dim)//3+1
-        k_dim2 = (3*k_dim1)//5
-        k_dim3 = (2*k_dim2)//3
+        k_dim1 = 25
+        k_dim2 = 20
+        k_dim3 = 15
+        k_dim4 = 10
 
-        v_dim1 = int((vision_dim - kernel_size)/stride1 + 1)
-        v_dim2 = int((v_dim1 - kernel_size)/stride2 + 1)
-        v_dim3 = int((v_dim2 - kernel_size)/stride3 + 1)
+        v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
+        v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
+        v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
+        v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
         
-        self.out_channels = nc3
-        self.out_dim = v_dim3+k_dim3
+        self.out_channels = nc4
+        self.out_dim = v_dim4+k_dim4
 
-        self.lv1 = nn.Conv1d(vision_channels, nc1, kernel_size, stride=stride1)
-        self.lv2 = nn.Conv1d(nc1, nc2, kernel_size, stride=stride2)
-        self.lv3 = nn.Conv1d(nc2, nc3, kernel_size, stride=stride3)
+        self.lv1 = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+        self.lv2 = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+        self.lv3 = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+        self.lv4 = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
 
         self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
         self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
         self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
+        self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
 
-        self.lm1 = parallel_Linear(nc3, self.out_dim, self.out_dim)
-        self.lm2 = parallel_Linear(nc3, self.out_dim, self.out_dim)
+        # self.lm1 = parallel_Linear(nc3, self.out_dim, self.out_dim)
+        # self.lm2 = parallel_Linear(nc3, self.out_dim, self.out_dim)
         
         self.bn1 = nn.BatchNorm1d(nc1)
         self.bn2 = nn.BatchNorm1d(nc2)
         self.bn3 = nn.BatchNorm1d(nc3)
+        self.bn4 = nn.BatchNorm1d(nc4)
                         
         self.apply(weights_init_)
     
@@ -926,19 +787,18 @@ class ConditionalVQVAE_encoderNet(nn.Module):
         kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
 
         v = F.relu(self.bn1(self.lv1(vision_input)))
-        assert v.size(2) == 10, 'wtf vdim'
         v = F.relu(self.bn2(self.lv2(v)))
-        assert v.size(2) == 5, 'wtf vdim'
-        v = self.lv3(v)
-        assert v.size(2) == 4, 'wtf vdim'
-
+        v = F.relu(self.bn3(self.lv3(v)))
+        v = self.lv4(v)
+        
         k = F.relu(self.bn1(self.lk1(kinematic_input)))
         k = F.relu(self.bn2(self.lk2(k)))
-        k = self.lk3(k)
+        k = F.relu(self.bn3(self.lk3(k)))
+        k = self.lk4(k)
 
         ze = torch.cat([k,v],2)
-        ze = F.relu(self.bn3(self.lm1(ze)))
-        ze = self.lm2(ze)
+        # ze = F.relu(self.bn3(self.lm1(ze)))
+        # ze = self.lm2(ze)
 
         return ze
 
@@ -950,55 +810,84 @@ class ConditionalVQVAE_decoderNet(nn.Module):
         self.vision_dim = vision_dim
         self.kinematic_dim = s_dim - vision_dim*vision_channels      
         
-        nc1 = vision_channels * 2
-        nc2 = vision_channels * 3
-        nc3 = vision_channels * 4
+        self.nc1 = vision_channels * 2
+        self.nc2 = vision_channels * 4
+        self.nc3 = vision_channels * 8
+        self.nc4 = vision_channels * 16
 
-        kernel_size = 2
-        stride1 = 2
-        stride2 = 2
-        stride3 = 1
+        kernel_size1 = 4
+        kernel_size2 = 4
+        kernel_size3 = 3
+        kernel_size4 = 3
+
+        dilation1 = 1
+        dilation2 = 2
+        dilation3 = 1
+        dilation4 = 2
         
-        k_dim1 = (2*self.kinematic_dim)//3+1
-        k_dim2 = (3*k_dim1)//5
-        k_dim3 = (2*k_dim2)//3
+        k_dim1 = 25
+        k_dim2 = 20
+        k_dim3 = 15
+        k_dim4 = 10
 
-        v_dim1 = int((vision_dim - kernel_size)/stride1 + 1)
-        v_dim2 = int((v_dim1 - kernel_size)/stride2 + 1)
-        v_dim3 = int((v_dim2 - kernel_size)/stride3 + 1)
+        v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
+        v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
+        v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
+        v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
         
-        self.in_channels = nc3
-        self.in_dim = v_dim3+k_dim3
-        self.latent_vision_dim = v_dim3
+        self.in_channels = self.nc4
+        self.in_dim = v_dim4+k_dim4
+        self.latent_vision_dim = v_dim4
 
-        self.lv1 = nn.ConvTranspose1d(nc3, nc2, kernel_size, stride=stride3)
-        self.lv2 = nn.ConvTranspose1d(nc2, nc1, kernel_size, stride=stride2)
-        self.lv3 = nn.ConvTranspose1d(nc1, vision_channels, kernel_size, stride=stride1)
+        self.lv1 = nn.ConvTranspose1d(self.nc4, self.nc3, kernel_size4, dilation=dilation4)
+        self.lv2 = nn.ConvTranspose1d(self.nc3, self.nc2, kernel_size3, dilation=dilation3)
+        self.lv3 = nn.ConvTranspose1d(self.nc2, self.nc1, kernel_size2, dilation=dilation2)
+        self.lv4 = nn.ConvTranspose1d(self.nc1, vision_channels, kernel_size1, dilation=dilation1)
         
-        self.lk1 = multichannel_Linear(nc3, nc2, k_dim3, k_dim2)
-        self.lk2 = multichannel_Linear(nc2, nc1, k_dim2, k_dim1)
-        self.lk3 = multichannel_Linear(nc1, 1, k_dim1, self.kinematic_dim)
+        self.lk1 = multichannel_Linear(self.nc4, self.nc3, k_dim4, k_dim3)
+        self.lk2 = multichannel_Linear(self.nc3, self.nc2, k_dim3, k_dim2)
+        self.lk3 = multichannel_Linear(self.nc2, self.nc1, k_dim2, k_dim1)
+        self.lk4 = multichannel_Linear(self.nc1, 1, k_dim1, self.kinematic_dim)
+
+        self.lkv1 = multichannel_Linear(self.nc4, self.nc3, k_dim4, v_dim3)
+        self.lkv2 = multichannel_Linear(self.nc3, self.nc2, k_dim3, v_dim2)
+        self.lkv3 = multichannel_Linear(self.nc2, self.nc1, k_dim2, v_dim1)
+        self.lkv4 = multichannel_Linear(self.nc1, vision_channels, k_dim1, self.vision_dim)
         
-        self.la1 = nn.Linear(a_dim+n_tasks, self.in_dim*nc3)
-        self.la2 = nn.Linear(a_dim+n_tasks, self.in_dim*nc3)
-        self.lak1 = nn.Linear(a_dim+n_tasks, k_dim2*nc2)
-        self.lak2 = nn.Linear(a_dim+n_tasks, k_dim1*nc1)
-        self.lak3 = nn.Linear(a_dim+n_tasks, self.kinematic_dim)
-        self.lav1 = nn.Linear(a_dim+n_tasks, v_dim2*nc2)
-        self.lav2 = nn.Linear(a_dim+n_tasks, v_dim1*nc1)
-        self.lav3 = nn.Linear(a_dim+n_tasks, self.vision_dim*self.vision_channels)
-        self.lar1 = nn.Linear(n_tasks, 100)
+        self.lek1 = nn.Linear(a_dim+n_tasks, k_dim3*self.nc3)
+        self.lek2 = nn.Linear(a_dim+n_tasks, k_dim2*self.nc2)
+        self.lek3 = nn.Linear(a_dim+n_tasks, k_dim1*self.nc1)
+        self.lek4 = nn.Linear(a_dim+n_tasks, self.kinematic_dim)
+        self.lev1 = nn.Linear(a_dim+n_tasks, v_dim3*self.nc3)
+        self.lev2 = nn.Linear(a_dim+n_tasks, v_dim2*self.nc2)
+        self.lev3 = nn.Linear(a_dim+n_tasks, v_dim1*self.nc1)
+        self.lev4 = nn.Linear(a_dim+n_tasks, self.vision_dim*self.vision_channels)
+        self.ler1 = nn.Linear(a_dim+n_tasks, self.in_dim*self.nc3)
+        self.ler2 = nn.Linear(a_dim+n_tasks, 100*self.nc3)
+        self.ler3 = nn.Linear(a_dim+n_tasks, 100)
 
-        self.lm1 = parallel_Linear(nc3, self.in_dim, self.in_dim)
-        self.lm2 = parallel_Linear(nc3, self.in_dim, self.in_dim)
+        self.lak1 = nn.Linear(a_dim+n_tasks, k_dim3*self.nc3)
+        self.lak2 = nn.Linear(a_dim+n_tasks, k_dim2*self.nc2)
+        self.lak3 = nn.Linear(a_dim+n_tasks, k_dim1*self.nc1)
+        self.lav1 = nn.Linear(a_dim+n_tasks, v_dim3*self.nc3)
+        self.lav2 = nn.Linear(a_dim+n_tasks, v_dim2*self.nc2)
+        self.lav3 = nn.Linear(a_dim+n_tasks, v_dim1*self.nc1)
+        self.lar1 = nn.Linear(a_dim+n_tasks, self.in_dim*self.nc3)
+        self.lar2 = nn.Linear(a_dim+n_tasks, 100*self.nc3)
+        self.lar3 = nn.Linear(a_dim+n_tasks, 100)
 
-        self.lr1 = nn.Linear(s_dim+a_dim+self.in_dim*nc3, 100)
+        #self.lm1 = parallel_Linear(nc3, self.in_dim, self.in_dim)
+        #self.lm2 = parallel_Linear(nc3, self.in_dim, self.in_dim)
+
+        self.lc1x1_1 = nn.Conv1d(self.nc4, self.nc3, 1, stride=1)
+        self.lc1x1_2 = nn.Conv1d(self.nc3, 1, 1, stride=1)
+        self.lr1 = parallel_Linear(self.nc3, self.in_dim, 100)
         self.lr2 = nn.Linear(100, 1)
         
-        self.bn1 = nn.BatchNorm1d(nc3)
-        self.bn2 = nn.BatchNorm1d(nc2)
-        self.bn3 = nn.BatchNorm1d(nc1)
-        self.bnr = nn.BatchNorm1d(100)
+        self.bn1 = nn.BatchNorm1d(self.nc3)
+        self.bn2 = nn.BatchNorm1d(self.nc2)
+        self.bn3 = nn.BatchNorm1d(self.nc1)
+        self.bn4 = nn.BatchNorm1d(100)
                 
         self.apply(weights_init_)
     
@@ -1007,30 +896,30 @@ class ConditionalVQVAE_decoderNet(nn.Module):
         t_mask[np.arange(a.size(0)), t] = torch.ones(a.size(0),).to(device)
         attention_input = torch.cat([a,t_mask],1)
 
-        x = F.relu(self.bn1(self.lm1(zq))) * torch.sigmoid(self.la1(attention_input)).view(-1,self.in_channels, self.in_dim)
-        x = F.relu(self.bn1(self.lm2(x))) * torch.sigmoid(self.la2(attention_input)).view(-1,self.in_channels, self.in_dim)
+        #x = F.relu(self.bn1(self.lm1(zq))) * torch.sigmoid(self.la1(attention_input)).view(-1,self.in_channels, self.in_dim)
+        #x = F.relu(self.bn1(self.lm2(x))) * torch.sigmoid(self.la2(attention_input)).view(-1,self.in_channels, self.in_dim)
 
-        v = x[:,:,-self.latent_vision_dim:]
-        k = x[:,:,:-self.latent_vision_dim]
+        v = zq[:,:,-self.latent_vision_dim:]
+        k0 = zq[:,:,:-self.latent_vision_dim]
 
-        k = F.relu(self.bn2(self.lk1(k)))
-        k = k * torch.sigmoid(self.lak1(attention_input)).view(k.size())
-        k = F.relu(self.bn3(self.lk2(k)))
-        k = k * torch.sigmoid(self.lak2(attention_input)).view(k.size())
-        k = self.lk3(k)
-        k = k.squeeze(1) * torch.sigmoid(self.lak3(attention_input))
+        k1 = F.relu(self.bn1(self.lk1(k0) + self.lek1(attention_input).view(k0.size(0), self.nc3, -1))) * torch.sigmoid(self.lak1(attention_input)).view(k0.size(0), self.nc3, -1)
+        k2 = F.relu(self.bn2(self.lk2(k1) + self.lek2(attention_input).view(k1.size(0), self.nc2, -1))) * torch.sigmoid(self.lak2(attention_input)).view(k1.size(0), self.nc2, -1)
+        k3 = F.relu(self.bn3(self.lk3(k2) + self.lek3(attention_input).view(k2.size(0), self.nc1, -1))) * torch.sigmoid(self.lak3(attention_input)).view(k2.size(0), self.nc1, -1)
+        k = self.lk4(k3).squeeze(1) + self.lek4(attention_input)
+        # k = k.squeeze(1) * torch.sigmoid(self.lak3(attention_input))
 
-        v = F.relu(self.bn2(self.lv1(v)))
-        v = v * torch.sigmoid(self.lav1(attention_input)).view(v.size())
-        v = F.relu(self.bn3(self.lv2(v)))
-        v = v * torch.sigmoid(self.lav2(attention_input)).view(v.size())
-        v = self.lv3(v)
-        v = v.view(-1,self.vision_dim*self.vision_channels) * torch.sigmoid(self.lav3(attention_input))
+        v = F.relu(self.bn1(self.lv1(v) + self.lev1(attention_input).view(v.size(0), self.nc3, -1) + self.lkv1(k0))) * torch.sigmoid(self.lav1(attention_input)).view(v.size(0), self.nc3, -1)
+        v = F.relu(self.bn2(self.lv2(v) + self.lev2(attention_input).view(v.size(0), self.nc2, -1) + self.lkv2(k1))) * torch.sigmoid(self.lav2(attention_input)).view(v.size(0), self.nc2, -1)
+        v = F.relu(self.bn3(self.lv3(v) + self.lev3(attention_input).view(v.size(0), self.nc1, -1) + self.lkv3(k2))) * torch.sigmoid(self.lav3(attention_input)).view(v.size(0), self.nc1, -1)
+        v = torch.sigmoid((self.lv4(v) + self.lkv4(k3)).view(-1,self.vision_dim*self.vision_channels) + self.lev4(attention_input))
+        # v = v.view(-1,self.vision_dim*self.vision_channels) * torch.sigmoid(self.lav3(attention_input))
 
         ns = torch.cat([k,v],1)
         
-        r = torch.cat([ns,a,zq.view(-1,self.in_dim*self.in_channels)],1)
-        r = F.relu(self.bnr(self.lr1(r))) * torch.sigmoid(self.lar1(t_mask))
+        # r = torch.cat([a,zq.view(-1,self.in_dim*self.in_channels)],1)
+        r = F.relu(self.bn1(self.lc1x1_1(zq.detach()) + self.ler1(attention_input).view(v.size(0), self.nc3, -1))) * torch.sigmoid(self.lar1(attention_input)).view(v.size(0), self.nc3, -1)
+        r = F.relu(self.bn1(self.lr1(r) + self.ler2(attention_input).view(r.size(0), self.nc3, -1))) * torch.sigmoid(self.lar2(attention_input)).view(r.size(0), self.nc3, -1)
+        r = F.relu(self.bn4(self.lc1x1_2(r).squeeze(1) + self.ler3(attention_input))) * torch.sigmoid(self.lar3(attention_input))
         r = self.lr2(r)
         
         return ns, r
@@ -1052,11 +941,10 @@ class ConditionalVQVAE_embeddingSpaceNet(nn.Module):
         if len(z) == 0:
             z = self.code2latent(ze)
         e = self.dictionary[z.view(-1),:].view(z.size(0), z.size(1), -1)
-        zq = e.clone()
-        return zq, e
+        return e
 
 class ConditionalVQVAE_Net(nn.Module):
-    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, beta=10.0, reward_weight=1.0, alpha=0.99):
+    def __init__(self, s_dim, a_dim, n_tasks=1, lr=3e-4, beta=0.25, reward_weight=100.0, alpha=0.99, temperature=10.0):
         super().__init__()
 
         self.encoder = ConditionalVQVAE_encoderNet(s_dim)
@@ -1067,6 +955,7 @@ class ConditionalVQVAE_Net(nn.Module):
 
         self.alpha = alpha
         self.beta = beta
+        self.temperature = temperature
         self.reward_weight = reward_weight
 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
@@ -1081,8 +970,8 @@ class ConditionalVQVAE_Net(nn.Module):
         self.estimated_std = self.alpha * self.estimated_std + (1.0-self.alpha) * (((s-self.estimated_mean)**2).mean(0, keepdim=True)**0.5).detach()
 
         ze = self.encoder(s)
-        zq, e = self.embedding_space(ze, z=z)
-        zq = zq.detach() + ze - ze.detach()
+        e = self.embedding_space(ze, z=z)
+        zq = e.detach() + ze - ze.detach()
         ns, r = self.decoder(zq, a, t)
         return ns, r, ze, e
     
@@ -1090,19 +979,27 @@ class ConditionalVQVAE_Net(nn.Module):
         self.reward_mean = self.alpha * self.reward_mean + (1.0-self.alpha) * r.mean().detach()
         self.reward_std = self.alpha * self.reward_std + (1.0-self.alpha) * (((r-self.reward_mean)**2).mean()**0.5).detach()
 
-        reconstruction_error = (((ns_off - ns) / (self.estimated_std+1e-6))**2).sum(1).mean()
+        reconstruction_error = (((ns_off - ns) / (self.estimated_std+1e-6))**2).sum(1)
+        reconstruction_error_factor = torch.exp((reconstruction_error - reconstruction_error.max())/self.temperature)
+        reconstruction_error_factor = reconstruction_error_factor / reconstruction_error_factor.sum()
+        assert torch.all(reconstruction_error_factor == reconstruction_error_factor), 'invalid error factor'
+        reconstruction_error = (reconstruction_error * reconstruction_error_factor.detach()).sum()        
         reward_error = (((r_off-r) / (self.reward_std+1e-6))**2).mean()
+        reward_error_factor = torch.exp((reward_error - reward_error.max())/self.temperature)
+        reward_error_factor = reward_error_factor / reward_error_factor.sum()
+        reward_error = (reward_error * reward_error_factor.detach()).sum()
         VQ_loss = ((ze.detach()-e)**2).sum(2).mean()
         commitment_loss = ((ze-e.detach())**2).sum(2).mean()
 
         loss = reconstruction_error + self.reward_weight * reward_error + VQ_loss + self.beta * commitment_loss
 
-        print("reconstruction loss: "+ str(np.round(reconstruction_error.item(),4)))
-        print("reward reconstruction loss: "+ str(np.round(self.reward_weight * reward_error.item(),4)))
-        print("VQ loss: "+ str(np.round(VQ_loss.item(),4)))
-        print("commitment loss: "+ str(np.round(commitment_loss.item(),4)))
+        # print("reconstruction loss: "+ str(np.round(reconstruction_error.item(),4)))
+        # print("reward reconstruction loss: "+ str(np.round(self.reward_weight * reward_error.item(),4)))
+        # print("VQ loss: "+ str(np.round(VQ_loss.item(),4)))
+        # print("commitment loss: "+ str(np.round(commitment_loss.item(),4)))
+        # print("max rec. error factor: "+ str(np.round(reconstruction_error_factor.max().item(),4)))
 
-        return loss
+        return loss, reconstruction_error, reward_error, VQ_loss, reconstruction_error_factor.max().item()
 
 
 class RNet(nn.Module):
@@ -1491,59 +1388,6 @@ class mixtureConceptModel(nn.Module):
             # S = log_posterior.argmax(1).cpu()        
         return S, posterior
     
-    # def posterior(self, s):
-    #     llhoods = self.llhood(s)
-    #     lmmbrship = torch.logsumexp(llhoods, 1, keepdim=True)
-    #     post = torch.exp(llhoods - lmmbrship)
-    #     return post
-    
-    # def KL_divergence(self):
-    #     m, log_stdev = self(self.KL_samples)
-    #     stdev = log_stdev.exp()      
-    #     S = Categorical(torch.ones(self.n_m_states)/self.n_m_states).sample([self.KL_samples]).cpu()
-    #     m_S = m[list(range(self.KL_samples)),S.tolist(),:]
-    #     stdev_S = stdev[list(range(self.KL_samples)),S.tolist(),:]
-    #     s = m_S + stdev_S*torch.randn_like(m_S)
-    #     llhoods = self.llhood(s)
-    #     lmmbrship = torch.logsumexp(llhoods, 1, keepdim=True)
-    #     KL = (lmmbrship - llhoods).sum(dim=1).mean()
-    #     return KL, lmmbrship
-    
-    # def KL_divergence_pairs(self):
-    #     m, log_stdev = self(self.KL_samples)
-    #     stdev = log_stdev.exp()     
-    #     z = m + stdev*torch.randn_like(m)         
-    #     llhoods = self.llhood(z.view(-1,self.s_dim)).view(-1,self.n_m_states,self.n_m_states)
-    #     if self.state_normalization:
-    #         s = torch.tanh(z)
-    #         tanh_llhoods = - torch.log(torch.clamp(1 - s.pow(2), 1e-6, 1.0)).sum(dim=2).view(-1,1,self.n_m_states)
-    #         llhoods += tanh_llhoods.repeat(1,self.n_m_states,1)
-    #     sum_logs = llhoods.sum(dim=2)
-    #     logs = self.n_m_states * llhoods[:,list(range(self.n_m_states)),list(range(self.n_m_states))]
-    #     KL = (logs - sum_logs).mean()        
-    #     return KL
-    
-    # def sample_and_KL_divergence(self):
-    #     m, log_stdev = self(self.KL_samples)
-    #     stdev = log_stdev.exp()      
-    #     S = Categorical(torch.ones(self.n_m_states)/self.n_m_states).sample([self.KL_samples]).cpu()
-    #     m_S = m[list(range(self.KL_samples)),S.tolist(),:]
-    #     stdev_S = stdev[list(range(self.KL_samples)),S.tolist(),:]
-    #     s = m_S + stdev_S*torch.randn_like(m_S)
-    #     llhoods = self.llhood(s)
-    #     lmmbrship = torch.logsumexp(llhoods, 1, keepdim=True)
-    #     KL = (lmmbrship - llhoods).sum(dim=1).mean()
-    #     return s, KL
-    
-    # def sample(self, batch_size):
-    #     m, log_stdev = self(batch_size)
-    #     stdev = log_stdev.exp()      
-    #     S = Categorical(torch.ones(self.n_m_states)/self.n_m_states).sample([self.KL_samples]).cpu()
-    #     m_S = m[list(range(self.KL_samples)),S.tolist(),:]
-    #     stdev_S = stdev[list(range(self.KL_samples)),S.tolist(),:]
-    #     s = m_S + stdev_S*torch.randn_like(m_S)        
-    #     return s
-
 
 class encoderConceptModel(nn.Module):
     def __init__(self, n_m_states, input_dim, n_tasks=1, hidden_dim=256, min_log_stdev=-4, max_log_stdev=2, lr=3e-4, min_c=1, init_method='glorot'):
@@ -1641,10 +1485,111 @@ class encoderConceptModel(nn.Module):
             self.prior[T,:] += torch.FloatTensor(P_S.reshape(-1)).to(device).clone()
         self.prior[T,:] *= self.prior_n/(self.prior_n+1)
 
-    # def update_prior(self, S, T):
-    #     self.prior[T,S] += 1
-    #     self.prior[T,:] *= self.prior_n/(self.prior_n+1)
+class classifierConceptModel(nn.Module):
+    def __init__(self, n_m_states, s_dim, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=2):
+        super().__init__()  
+        self.n_tasks = n_tasks
+        self.s_dim = s_dim   
+        self.n_m_states = n_m_states
+        self.vision_channels = vision_channels
+        self.vision_dim = vision_dim
+        self.kinematic_dim = s_dim - vision_dim*vision_channels     
+        
+        nc1 = vision_channels * 2
+        nc2 = vision_channels * 4
+        nc3 = vision_channels * 8
+        nc4 = vision_channels * 16
 
+        kernel_size1 = 4
+        kernel_size2 = 4
+        kernel_size3 = 3
+        kernel_size4 = 3
+
+        dilation1 = 1
+        dilation2 = 2
+        dilation3 = 1
+        dilation4 = 2
+        
+        k_dim1 = 24
+        k_dim2 = 20
+        k_dim3 = 15
+        k_dim4 = 10
+
+        v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
+        v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
+        v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
+        v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
+        
+        self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+        self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+        self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+        self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
+        self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+        self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+        self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+        self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
+
+        self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
+        self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
+        self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
+        self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
+
+        self.lc1x1 = nn.Conv1d(nc4, n_m_states, 1, stride=1)
+        self.lkv = parallel_Linear(n_m_states, v_dim4+k_dim4, 1)
+        
+        self.bn1 = nn.BatchNorm1d(nc1)
+        self.bn2 = nn.BatchNorm1d(nc2)
+        self.bn3 = nn.BatchNorm1d(nc3)
+        self.bn4 = nn.BatchNorm1d(nc4)
+        self.bn5 = nn.BatchNorm1d(n_m_states)
+                        
+        self.apply(weights_init_)
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
+        
+
+    def forward(self, s):
+        vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
+        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
+
+        v = torch.tanh(self.bn1(self.lv1e(vision_input))) * torch.sigmoid(self.bn1(self.lv1g(vision_input)))
+        v = torch.tanh(self.bn2(self.lv2e(v))) * torch.sigmoid(self.bn2(self.lv2g(v)))
+        v = torch.tanh(self.bn3(self.lv3e(v))) * torch.sigmoid(self.bn3(self.lv3g(v)))
+        v = torch.tanh(self.bn4(self.lv4e(v))) * torch.sigmoid(self.bn4(self.lv4g(v)))
+        
+        k = F.relu(self.bn1(self.lk1(kinematic_input)))
+        k = F.relu(self.bn2(self.lk2(k)))
+        k = F.relu(self.bn3(self.lk3(k)))
+        k = torch.tanh(self.bn4(self.lk4(k)))
+
+        x = torch.cat([k,v],2)
+        x = F.relu(self.bn5(self.lc1x1(x)))
+        x = torch.exp(self.lkv(x).squeeze(2))
+        PS_s = x / x.sum(1, keepdim=True)
+
+        return PS_s
+
+    def sample_m_state(self, s, explore=True):
+        PS_s = self(s.view(1,-1)).view(-1)
+        if explore:
+            S = Categorical(probs=PS_s).sample().item()
+        else:            
+            tie_breaking_dist = torch.isclose(PS_s, PS_s.max()).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().item()            
+        return S, PS_s
+    
+    def sample_m_state_and_posterior(self, s, explore=True):
+        PS_s = self(s)
+        if explore:
+            S = Categorical(probs=PS_s).sample().cpu()
+        else:            
+            tie_breaking_dist = torch.isclose(PS_s, PS_s.max(1, keepdim=True)[0]).float()
+            tie_breaking_dist /= tie_breaking_dist.sum()
+            S = Categorical(probs=tie_breaking_dist).sample().cpu()            
+        return S, PS_s, torch.log(PS_s+1e-12)
+    
+    
 class policyNet(nn.Module):
     def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, lr=3e-4, hidden_dim=256, 
         latent_dim=0, min_c=2, init_method='glorot'):

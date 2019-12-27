@@ -9,7 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from nets import (Memory, v_valueNet, q_valueNet, policyNet, conditionalEncoder, mixtureConceptModel, encoderConceptModel, 
                     rNet, rewardNet, v_parallel_valueNet, q_parallel_valueNet, nextSNet, conceptLossNet, transitionNet, 
-                    r_parallelNet, SimPLeNet, ConditionalSimPLeNet, AutoregressivePrior, ConditionalVQVAE_Net)
+                    r_parallelNet, SimPLeNet, ConditionalSimPLeNet, AutoregressivePrior, ConditionalVQVAE_Net, classifierConceptModel)
 from tabularQ import Agent as mAgent
 
 import os
@@ -19,6 +19,7 @@ from sys import stdout
 import itertools
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+import curses
 # from torch.utils.tensorboard import SummaryWriter
 
 import cv2
@@ -41,6 +42,18 @@ plt.ion()
 #                           General methods
 #
 ###########################################################################
+def report_learning_progress(stdscr, iter_, transition_loss, reconstruction_error_wn, reconstruction_error_nn, reward_error_wn, reward_error_nn, max_error_factor, vq_loss):
+    """Transition model learning progress"""
+    stdscr.addstr(0, 0, "Iteration: {}".format(iter_))
+    stdscr.addstr(1, 0, "Transition loss: {}".format(transition_loss))
+    stdscr.addstr(2, 0, "Reconstruction loss (wn): {}".format(reconstruction_error_wn))
+    stdscr.addstr(3, 0, "Reconstruction loss (nn): {}".format(reconstruction_error_nn))
+    stdscr.addstr(4, 0, "Reward loss (wn): {}".format(reward_error_wn))
+    stdscr.addstr(5, 0, "Reward loss (nn): {}".format(reward_error_nn))
+    stdscr.addstr(6, 0, "Max error factor: {}".format(max_error_factor))
+    stdscr.addstr(7, 0, "VQ loss: {}".format(vq_loss))
+    stdscr.refresh()
+
 def updateNet(target, source, tau):    
     for target_param, source_param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(target_param.data * (1.0 - tau) + source_param.data * tau)
@@ -206,8 +219,12 @@ class Agent:
                             'tau_beta_SR': 3e-4,
                             'tau_beta_nSSA': 3e-4,
                             'tau_beta_AT': 3e-4,
+                            'tau_beta_ST': 3e-4,
                             'n_dims_excluded': 2,
-                            'SimPLe_distribution_type_encoder': 'discrete'                             
+                            'SimPLe_distribution_type_encoder': 'discrete',
+                            'forgetting_factor_empiric_policy': 5e-2,
+                            'beta_empiric_policy': 10.0,
+                            'beta_ST': 1.0                              
                         }
         
         for key, value in default_params.items():
@@ -272,6 +289,8 @@ class Agent:
         self.threshold_entropy_beta_AT = self.params['threshold_entropy_beta_AT']
         self.threshold_entropy_beta_nSSA = self.params['threshold_entropy_beta_nSSA']
         self.transition_model_type = self.params['transition_model']
+        self.forgetting_factor_empiric_policy = self.params['forgetting_factor_empiric_policy']
+        self.beta_empiric_policy = self.params['beta_empiric_policy']
 
         # State machine vars to handle the time period of the upper level
         self.m_state = 0
@@ -316,6 +335,13 @@ class Agent:
             self.eta_PS = self.params['eta_PS'].float().to(device)
         else:
             self.eta_PS = torch.from_numpy(self.params['eta_PS']).float().to(device)
+        
+        if isinstance(self.params['beta_ST'], float):
+            self.beta_ST = self.params['beta_ST'] * torch.ones(self.n_tasks).float().to(device)
+        elif isinstance(self.params['beta_ST'], torch.FloatTensor) or isinstance(self.params['beta_ST'], torch.Tensor):
+            self.beta_ST = self.params['beta_ST'].float().to(device)
+        else:
+            self.beta_ST = torch.from_numpy(self.params['beta_ST']).float().to(device)
 
         self.beta_Ss = self.params['beta_Ss']        
         self.beta_SR = self.params['beta_SR']
@@ -326,6 +352,7 @@ class Agent:
         self.tau_beta_SR = self.params['tau_beta_SR']
         self.tau_beta_nSSA = self.params['tau_beta_nSSA']
         self.tau_beta_AT = self.params['tau_beta_AT']
+        self.tau_beta_ST = self.params['tau_beta_ST']
 
         if isinstance(self.params['mu'], float):
             self.mu = self.params['mu'] * torch.ones(self.n_tasks).float().to(device)
@@ -360,6 +387,8 @@ class Agent:
             elif self.concept_model_type == 'encoder':
                 self.concept_model = encoderConceptModel(self.n_m_states, s_dim-self.n_dims_excluded, n_tasks=self.n_tasks, lr=self.params['cm_lr'], min_log_stdev=self.params['min_log_stdev'], 
                                         max_log_stdev=self.params['max_log_stdev'], min_c=self.params['min_c_s']).to(device)
+            else:
+                self.concept_model = classifierConceptModel(self.n_m_states, s_dim-self.n_dims_excluded, n_tasks=self.n_tasks, lr=self.params['cm_lr']).to(device)
             # self.concept_critic = conceptLossNet(s_dim, self.n_m_states).to(device)
             # self.evolution_model = nextSNet(s_dim, self.n_m_states, self.n_m_actions, n_tasks=self.n_tasks).to(device)
             # self.reward_model = rewardNet(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['r_lr']).to(device)
@@ -371,7 +400,7 @@ class Agent:
                 self.transition_model = SimPLeNet(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['t_lr'], C_0=self.params['C_0'], distribution_type=self.params['SimPLe_distribution_type_encoder']).to(device)
             else:
                 self.transition_model = ConditionalVQVAE_Net(s_dim, a_dim, n_tasks=self.n_tasks, lr=self.params['t_lr']).to(device)
-            self.latent_prior = AutoregressivePrior(self.transition_model.latent_dim, period=self.upper_level_period, n_tasks=self.n_tasks).to(device)
+            # self.latent_prior = AutoregressivePrior(self.transition_model.latent_dim, period=self.upper_level_period, n_tasks=self.n_tasks).to(device)
             # self.R_model = rNet(s_dim, self.n_m_actions, n_tasks=self.n_tasks, lr=self.params['r_lr']).to(device)
             # self.reward_model = RNet(n_m_states, n_tasks=n_tasks, lr=r_lr).to(device)
             # self.meta_critic = np.random.rand(self.n_tasks, self.n_m_states, self.n_m_actions)/self.alpha
@@ -393,6 +422,8 @@ class Agent:
         
             self.prior_n = 10000
             self.upper_transition_model = torch.ones(self.n_tasks, self.n_m_states, self.n_m_actions, self.n_m_states).to(device)*self.prior_n/self.n_m_states
+            self.concept_prior = torch.ones(self.n_tasks, self.n_m_states).to(device)/self.n_m_states
+            self.empiric_policy = torch.ones(self.n_tasks, self.n_m_actions).to(device)/self.n_m_actions
             self.reward_min = 1e+3*torch.ones(self.n_tasks, self.n_m_actions).to(device)
             self.reward_max = -1e+3*torch.ones(self.n_tasks, self.n_m_actions).to(device)
 
@@ -406,7 +437,7 @@ class Agent:
     
     @property
     def PS_T(self):
-        return self.concept_model.prior.detach().cpu().numpy()/self.concept_model.prior_n
+        return self.concept_prior.detach().cpu().numpy()
 
     def optimize_policy_upper_level(self):
         Q = self.meta_critic.copy()
@@ -436,104 +467,7 @@ class Agent:
 
         self.meta_actor = PA_ST.copy()
 
-    # def meta_learning(self, event):
-    #     S = int(event[0])
-    #     A = int(event[1])
-    #     R = event[2]
-    #     nS = int(event[3])
-    #     d = event[5]
-    #     T = int(event[6])
-    #     P_S = (event[7:7+self.n_m_states].copy()).reshape(-1,1)
-    #     P_nS = (event[7+self.n_m_states:].copy()).reshape(-1,1)
-    # def meta_learning(self, S_torch, nS_torch, R_torch, filtered_weights_torch): # a_importance_ratios_torch, task_count_torch, R_torch)
-    #     # # Update value estimation
-    #     # Q_nS = self.meta_critic[T, nS, :]
-    #     # Pi_nS = self.meta_actor[T, nS, :]
-    #     # V_nS = (Pi_nS * (Q_nS - self.alpha_upper_level * np.log(Pi_nS+1e-20))).sum()
-    #     # self.meta_critic[T, S, A] += self.delta_upper_level * (R + self.gamma*(1-d)*V_nS - self.meta_critic[T, S, A])
-
-    #     # Update value estimation
-    #     # r = np.random.rand()
-    #     # if r > 0.5:
-    #     #     Q_T = self.meta_critic1[T, :, :].copy()            
-    #     # else:
-    #     #     Q_T = self.meta_critic2[T, :, :].copy()
-
-    #     PA_ST = self.meta_actor.copy()
-    #     PS_T = self.PS_T[:,:,np.newaxis]
-    #     PA = (PA_ST * PS_T).sum(1, keepdims=True).mean(0, keepdims=True)        
-    #     # alpha_T = (self.alpha_upper_level[T,:]).reshape(-1,1)
-        
-    #     # V_nS = ((P_A_ST * (Q_T - alpha_T * np.log(P_A_ST + 1e-6) - self.beta_upper_level * np.log(P_A + 1e-6))).sum(1).reshape(-1,1) * P_nS).sum() 
-    #     # if r > 0.5:
-    #     #     self.meta_critic2[T, :, A] += self.delta_upper_level * (R + self.gamma*(1-d)*V_nS - self.meta_critic2[T, :, A].copy()) * P_S.reshape(-1)            
-    #     # else:
-    #     #     self.meta_critic1[T, :, A] += self.delta_upper_level * (R + self.gamma*(1-d)*V_nS - self.meta_critic1[T, :, A].copy()) * P_S.reshape(-1) 
-
-    #     # Update value estimation
-    #     PS_s = np.zeros([R_torch.size(0),self.n_m_states])
-    #     PnS_ns = np.zeros([R_torch.size(0),self.n_m_states])
-    #     PS_s[np.arange(R_torch.size(0)), S_torch.numpy()] = np.ones(R_torch.size(0))
-    #     PnS_ns[np.arange(R_torch.size(0)), nS_torch.numpy()] = np.ones(R_torch.size(0))
-    #     # PS_s = PS_s_torch.unsqueeze(1).unsqueeze(3).detach().cpu().numpy()
-    #     # PnS_ns = PnS_ns_torch.detach().cpu().numpy()
-    #     filtered_weights = filtered_weights_torch.unsqueeze(2).detach().cpu().numpy()
-    #     # a_importance_ratios = a_importance_ratios_torch.clamp(0.0,10.0).unsqueeze(1).unsqueeze(2).detach().cpu().numpy()
-    #     R = R_torch.view(-1,1).detach().cpu().numpy()
-
-    #     Q1 = self.meta_critic1.copy()
-    #     Q2 = self.meta_critic2.copy()
-
-    #     V1 = ((Q2 - self.alpha_upper_level[:,:,np.newaxis] * np.log(PA_ST+1e-10) - self.beta_upper_level * np.log(PA+1e-10)) * PA_ST).sum(2)
-    #     V2 = ((Q1 - self.alpha_upper_level[:,:,np.newaxis] * np.log(PA_ST+1e-10) - self.beta_upper_level * np.log(PA+1e-10)) * PA_ST).sum(2)
-
-    #     Q1_approx = PS_s[:,np.newaxis,:,np.newaxis] * PA_ST[np.newaxis,:,:,:] * (R + self.gamma * np.einsum('ij,hj->ih', PnS_ns, V1))[:,:,np.newaxis,np.newaxis]
-    #     Q2_approx = PS_s[:,np.newaxis,:,np.newaxis] * PA_ST[np.newaxis,:,:,:] * (R + self.gamma * np.einsum('ij,hj->ih', PnS_ns, V2))[:,:,np.newaxis,np.newaxis]
-        
-    #     Q1_error = ((Q1_approx - Q1[np.newaxis,:,:,:]) * filtered_weights).sum(0)
-    #     Q2_error = ((Q2_approx - Q2[np.newaxis,:,:,:]) * filtered_weights).sum(0)
-        
-    #     self.meta_critic1 += self.delta_upper_level * Q1_error
-    #     self.meta_critic2 += self.delta_upper_level * Q2_error
-        
-    #     # Update policy
-    #     # if (self.bottom_level_epsds + 1) % self.evaluation_upper_level_steps == 0:            
-    #     #     Q = self.meta_critic.copy()
-    #     #     Q = Q - Q.max(2, keepdims=True)
-    #     #     expQ = np.exp(Q/self.alpha_upper_level)
-    #     #     Z = expQ.sum(2, keepdims=True)
-    #     #     self.meta_actor = expQ/Z
-    #     self.optimize_policy_upper_level()
-        
-    #     PA_ST = self.meta_actor.copy()
-    #     HA_ST = -(PA_ST * np.log(PA_ST + 1e-10)).sum(2)
-    #     PA = (PA_ST * PS_T).sum(1).mean(0)
-    #     HA = -(PA * np.log(PA + 1e-10)).sum()
-
-    #     # Update alpha
-    #     # mask = self.alpha_upper_level <= self.alpha_upper_level_threshold
-    #     gradient_step = self.mu_upper_level * self.PS_T / self.n_tasks * (HA_ST - self.threshold_entropy_alpha_upper_level)
-    #     log_alpha = np.log(self.alpha_upper_level+1e-10)
-    #     log_alpha -= gradient_step #* mask
-    #     self.alpha_upper_level = np.exp(log_alpha).clip(1e-10, self.alpha_threshold) #- (1.0-mask) * gradient_step
-        
-    #     # Update beta
-    #     if not self.cancel_beta_upper_level:
-    #         # if self.beta_upper_level <= self.beta_upper_level_threshold:
-    #         log_beta = np.log(self.beta_upper_level+1e-10)
-    #         log_beta -= self.mu_upper_level * (HA - self.threshold_entropy_beta_upper_level) 
-    #         self.beta_upper_level = np.exp(log_beta).clip(1e-10, self.alpha_threshold)
-    #         # else:
-    #         #     self.beta_upper_level -= self.mu_upper_level * (HA - self.threshold_entropy_beta_upper_level)
-    #     else:
-    #         self.beta_upper_level = 0.0
-        
-    #     # Update delta, eta and mu
-    #     self.delta_upper_level = np.max([self.delta_upper_level*self.rate_delta_upper_level, self.min_delta_upper_level])
-    #     self.eta_upper_level = np.max([self.eta_upper_level*self.rate_delta_upper_level, self.min_eta_upper_level])
-    #     self.mu_upper_level = np.max([self.mu_upper_level*self.rate_delta_upper_level, self.min_mu_upper_level])
-
-    def meta_learning(self, PS_s_torch, R_torch, T, d):
+    def meta_learning(self, PS_s_torch, R_torch, T, d=[]):
         PA_ST = self.meta_actor.copy()
         PS_T = self.PS_T[:,:,np.newaxis]
         PA = (PA_ST * PS_T).sum(1, keepdims=True).mean(0, keepdims=True)  
@@ -655,7 +589,7 @@ class Agent:
         if self.model_update_method == 'discrete':
             self.upper_transition_model[T,S,A,nS] += 1.0
         else:
-            self.upper_transition_model[T,S,A,:] += torch.FloatTensor(P_nS.reshape(-1)).to(device).clone()
+            self.upper_transition_model[T,S,A,:] += torch.FloatTensor(P_nS.reshape(-1)).to(device).detach()
         self.upper_transition_model[T,S,A,:] *= self.prior_n/(self.prior_n+1)
 
     def high_level_decision(self, task, S, explore):
@@ -730,7 +664,7 @@ class Agent:
             if learn and self.hierarchical:
             
                 # Update prior
-                self.concept_model.update_prior(self.past_m_state, task, self.past_posterior.copy(), self.model_update_method)
+                # self.concept_model.update_prior(self.past_m_state, task, self.past_posterior.copy(), self.model_update_method)
                 self.update_upper_transition_model(self.past_m_state, self.past_m_action, self.m_state, task, self.posterior.copy())
 
                 if transfer:
@@ -777,7 +711,7 @@ class Agent:
         if done and not to_learn_complete and self.hierarchical and learn:
         
             # Update prior
-            self.concept_model.update_prior(self.m_state, task, self.past_posterior.copy(), self.model_update_method)
+            # self.concept_model.update_prior(self.m_state, task, self.past_posterior.copy(), self.model_update_method)
             PS = self.concept_model.sample_m_state(torch.from_numpy(state[self.n_dims_excluded:]).float().to(device), explore=True)[1]
             self.update_upper_transition_model(self.m_state, self.m_action, self.m_state, task, PS.detach().cpu().numpy().copy())   
 
@@ -804,6 +738,53 @@ class Agent:
         self.bottom_level_epsds = 0
         self.stored = False    
 
+    def learn_transition_model(self, iter_, stdscr):
+        batch = self.memory.sample(self.policy_batch_size)
+        batch = np.array(batch)
+
+        batch_size = batch.shape[0]
+
+        if batch_size > 0:
+            s_batch = torch.FloatTensor(batch[:,:self.s_dim]).to(device)
+            a_batch = torch.FloatTensor(batch[:,self.s_dim:self.sa_dim]).to(device)
+            r_batch = torch.FloatTensor(batch[:,self.sa_dim]).view(-1,1).to(device)
+            ns_batch = torch.FloatTensor(batch[:,self.sa_dim+1:self.sars_dim]).to(device)
+            T_batch = batch[:,self.sarsd_dim+1].astype('int')  
+
+            if self.transition_model_type in ['conditional', 'SimPLe']: 
+                ns_batch_off, r_batch_off, mean_off, log_stdev_off, z_off = self.transition_model(s_batch, a_batch, T_batch, ns=ns_batch)
+                if self.transition_model_type != 'conditional':
+                    ns_batch_off = ns_batch_off[np.arange(batch_size), T_batch, :]
+                    r_batch_off = r_batch_off[np.arange(batch_size), T_batch]
+                    mean_off = mean_off[np.arange(batch_size), T_batch, :]
+                    log_stdev_off = log_stdev_off[np.arange(batch_size), T_batch, :]
+                    z_off = z_off[np.arange(batch_size), T_batch, :]
+                transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), mean_off, log_stdev_off, z_off)
+            else:
+                ns_batch_off, r_batch_off, ze_off, e_off = self.transition_model(s_batch, a_batch, T_batch)
+                transition_loss, reconstruction_error, reward_error, VQ_loss, max_error_factor = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), ze_off, e_off)
+            
+            # print("transition loss: "+ str(np.round(transition_loss.item(),4)))
+            # print("transition loss std: "+ str(np.round(((ns_batch-ns_batch_off)**2).mean().item(),4)))
+            # # print("transition loss std 2: "+ str(np.round(((ns_batch[:,:87]-ns_batch_off[:, :87])**2).mean().item(),4)))
+            # print("reward loss: "+ str(np.round(((r_batch_off - r_batch)**2).mean().item(),4)))
+
+            report_learning_progress(stdscr, iter_, np.round(transition_loss.item(),4), np.round(reconstruction_error.item(),4), np.round(((ns_batch-ns_batch_off)**2).mean().item(),4), 
+                                        np.round(reward_error.item(),4), np.round(((r_batch_off - r_batch)**2).mean().item(),4), np.round(max_error_factor,4), np.round(VQ_loss.item(),4))
+
+            if self.transition_model_type in ['conditional', 'SimPLe']: 
+                print("mean stdev: "+ str(np.round(torch.exp(log_stdev_off).mean().item(),4)))
+                print("C: " + str(self.transition_model.C))
+
+            self.transition_model.optimizer.zero_grad()
+            transition_loss.backward()
+            clip_grad_norm_(self.transition_model.parameters(), self.clip_value)
+            self.transition_model.optimizer.step()
+            if self.transition_model_type in ['conditional', 'SimPLe']: 
+                assert torch.all(self.transition_model.decoder.l1.weight==self.transition_model.decoder.l1.weight), 'Invalid transition model parameters'
+            else:
+                assert torch.all(self.transition_model.decoder.lv1.weight==self.transition_model.decoder.lv1.weight), 'Invalid transition model parameters'
+    
     def learn_skills(self, only_metrics=False):
         batch = self.memory.sample(self.policy_batch_size)
         batch = np.array(batch)
@@ -839,50 +820,7 @@ class Agent:
                 self.critic2.optimizer.zero_grad()
                 q2_loss.backward()
                 clip_grad_norm_(self.critic2.parameters(), self.clip_value)
-                self.critic2.optimizer.step()
-
-                # Optimize reward model
-                # r_batch_off = self.reward_model(s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                # r_loss = self.reward_model.loss_func(r_batch_off, r_batch.detach())
-
-                # print("reward loss: "+ str(np.round(r_loss.item(),4)))
-
-                # self.reward_model.optimizer.zero_grad()
-                # r_loss.backward()
-                # clip_grad_norm_(self.reward_model.parameters(), self.clip_value)
-                # self.reward_model.optimizer.step()
-                # assert torch.all(self.reward_model.l1.weight==self.reward_model.l1.weight), 'Invalid reward model parameters'
-                # self.transition_model.train()
-                if self.transition_model_type in ['conditional', 'SimPLe']: 
-                    ns_batch_off, r_batch_off, mean_off, log_stdev_off, z_off = self.transition_model(s_batch, a_batch, T_batch, ns=ns_batch)
-                    if self.transition_model_type != 'conditional':
-                        ns_batch_off = ns_batch_off[np.arange(batch_size), T_batch, :]
-                        r_batch_off = r_batch_off[np.arange(batch_size), T_batch]
-                        mean_off = mean_off[np.arange(batch_size), T_batch, :]
-                        log_stdev_off = log_stdev_off[np.arange(batch_size), T_batch, :]
-                        z_off = z_off[np.arange(batch_size), T_batch, :]
-                    # assert ns_batch_off.shape == ns_batch.shape, 'wrong transition model size'
-                    transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), mean_off, log_stdev_off, z_off)
-                else:
-                    ns_batch_off, r_batch_off, ze_off, e_off = self.transition_model(s_batch, a_batch, T_batch)
-                    transition_loss = self.transition_model.loss_func(ns_batch_off, ns_batch.detach(), r_batch_off, r_batch.detach(), ze_off, e_off)
-                
-                print("transition loss: "+ str(np.round(transition_loss.item(),4)))
-                print("transition loss std: "+ str(np.round(((ns_batch-ns_batch_off)**2).mean().item(),4)))
-                print("transition loss std 2: "+ str(np.round(((ns_batch[:,:87]-ns_batch_off[:, :87])**2).mean().item(),4)))
-                print("reward loss: "+ str(np.round(((r_batch_off - r_batch)**2).mean().item(),4)))
-                if self.transition_model_type in ['conditional', 'SimPLe']: 
-                    print("mean stdev: "+ str(np.round(torch.exp(log_stdev_off).mean().item(),4)))
-                    print("C: " + str(self.transition_model.C))
-
-                self.transition_model.optimizer.zero_grad()
-                transition_loss.backward()
-                clip_grad_norm_(self.transition_model.parameters(), self.clip_value)
-                self.transition_model.optimizer.step()
-                if self.transition_model_type in ['conditional', 'SimPLe']: 
-                    assert torch.all(self.transition_model.decoder.l1.weight==self.transition_model.decoder.l1.weight), 'Invalid transition model parameters'
-                else:
-                    assert torch.all(self.transition_model.decoder.lv1.weight==self.transition_model.decoder.lv1.weight), 'Invalid transition model parameters'
+                self.critic2.optimizer.step()                
 
             # Optimize v network
             if self.hierarchical:
@@ -1010,7 +948,7 @@ class Agent:
 
         if only_metrics:
             marginal_A = PA_sT.mean(0) 
-            PS_T = self.concept_model.prior.detach().unsqueeze(2)/self.concept_model.prior_n
+            PS_T = self.concept_prior.detach().unsqueeze(2)
             metrics = {
                 'H(a|A,s)': Ha_A_sT.mean().detach().cpu().numpy(),
                 'H(A)': -(marginal_A * torch.log(marginal_A + 1e-12)).sum(0).mean().detach().cpu().numpy(),
@@ -1021,47 +959,6 @@ class Agent:
             
             return metrics
     
-    # def learn_reward(self, batch=[]):
-        # if self.hierarchical and not self.upper_memory.empty():
-        #     upper_batch = self.upper_memory.sample(self.concept_batch_size)
-        #     upper_batch = np.array(upper_batch)
-            
-        #     # a_llhoods_upper_batch = torch.FloatTensor(upper_batch[:,self.N_s_dim + self.upper_level_period*self.a_dim:-3]).to(device)
-        #     T_upper_batch = upper_batch[:,-2].astype('int')
-        #     R_upper_batch = torch.FloatTensor(upper_batch[:,-1]).unsqueeze(1).to(device)
-        #     s_upper_batch = torch.FloatTensor(upper_batch[:, 0: self.s_dim]).to(device)
-
-        #     # a_llhoods_upper_batch_off = torch.zeros_like(a_llhoods_upper_batch)
-        #     # for i in range(0, self.upper_level_period+1):
-        #     #     s_upper_batch_ = torch.FloatTensor(upper_batch[:, i*self.s_dim:(i+1)*self.s_dim]).to(device)
-        #     #     if i < self.upper_level_period:
-        #     #         a_upper_batch = torch.FloatTensor(upper_batch[:, self.N_s_dim + i*self.a_dim : self.N_s_dim + (i+1)*self.a_dim]).to(device)
-        #     #         a_llhoods_upper_batch_off += self.actor.llhoods(s_upper_batch_, a_upper_batch).detach()
-
-        #     # Optimize reward network
-        #     # a_importance_ratios = torch.exp((a_llhoods_upper_batch_off - a_llhoods_upper_batch).clamp(-1e6,10))+1e-10
-        #     R_llhood = self.reward_model.llhood(R_upper_batch, s_upper_batch, T_upper_batch)
-        #     R_model_loss = -(R_llhood).mean() # * a_importance_ratios.detach()).mean()
-        #     self.reward_model.optimizer.zero_grad()
-        #     R_model_loss.backward()
-        #     clip_grad_norm_(self.reward_model.parameters(), self.clip_value)
-        #     self.reward_model.optimizer.step()
-        # if not self.memory.empty():
-        #     if len(batch) == 0:
-        #         batch = self.upper_memory.sample(self.concept_batch_size)
-        #         batch = np.array(upper_batch)
-                    
-        #     s_batch = torch.FloatTensor(batch[:,0:self.s_dim]).to(device)
-        #     a_batch = torch.FloatTensor(batch[:,self.s_dim:self.sa_dim]).to(device)
-        #     T_batch = batch[:,-2].astype('int')
-        #     R_upper_batch = torch.FloatTensor(upper_batch[:,-1]).unsqueeze(1).to(device)
-        
-        #     R_batch_off = self.reward_model(s_upper_batch, a_upper_batches)[np.range(T_upper_batch.shape[0]), T_upper_batch]
-        #     R_loss = self.reward_model.loss_func(R_batch_off, R_upper_batch.detach())
-        #     self.reward_model.optimizer.zero_grad()
-        #     R_loss.backward()
-        #     clip_grad_norm_(self.reward_model.parameters(), self.clip_value)
-        #     self.reward_model.optimizer.step()
     def learn_reward(self, batch=[]):
         if not self.memory.empty():
             if len(batch) == 0: 
@@ -1071,43 +968,46 @@ class Agent:
             batch_size = batch.shape[0]
             
             s_upper_batch = torch.FloatTensor(batch[:,:self.s_dim]).to(device)
-            d_batch = torch.FloatTensor(batch[:,self.sars_dim]).view(-1,1).to(device)
+            # d_batch = torch.FloatTensor(batch[:,self.sars_dim]).view(-1,1).to(device)
             T_batch = batch[:,self.sarsd_dim+1].astype('int') 
             # print("T max: "+str(T_batch.max()))
             # print("T min: "+str(T_batch.min()))
+
+            del batch
             
             s_batch_off = s_upper_batch.view(batch_size,1,self.s_dim).repeat(1,self.n_m_actions,1)
-            s_batch_off_flat = s_batch_off.reshape(-1,self.s_dim).clone()
+            # s_batch_off_flat = s_batch_off.reshape(-1,self.s_dim).detach()
             R_batch_off = torch.zeros(batch_size,self.n_m_actions).to(device)
             
-            t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
-            t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
-            z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
+            # t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
+            # t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
+            # z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
 
             for i in range(0, self.upper_level_period):
                 assert batch_size > 0, 'empty memory'
                 assert torch.all(self.actor.l11.weight==self.actor.l11.weight), 'Invalid reward model parameters'
-                a_batch_off =  self.actor.sample_actions(s_batch_off[:,:,self.n_dims_excluded:], repeat=False).reshape(-1,self.a_dim).clone()
+                a_batch_off =  self.actor.sample_actions(s_batch_off[:,:,self.n_dims_excluded:], repeat=False).reshape(-1,self.a_dim).detach()
+                
                 # assert torch.all(self.reward_model.l1.weight==self.reward_model.l1.weight), 'Invalid reward model parameters'
                 # R_batch_off += self.reward_model(s_batch_off_flat, a_batch_off).reshape(-1,self.n_m_actions,self.n_tasks).clone()[np.arange(batch_size),:,T_batch]
                 # assert torch.all(self.transition_model.l1.weight==self.transition_model.l1.weight), 'Invalid reward model parameters'
                 # self.transition_model.eval()
-                if self.transition_model_type == 'VQVAE':
-                    z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
-                    z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
-                    z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
-                    z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
-                else:
-                    z=z_batch[:,i,:]
-                s_batch_off, r_batch_off = self.transition_model(s_batch_off_flat, a_batch_off, T_batch.repeat(self.n_m_actions), z=z)[:2]                
+                # if self.transition_model_type == 'VQVAE':
+                #     z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
+                #     z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
+                #     z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
+                #     z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
+                # else:
+                #     z=z_batch[:,i,:]
+                s_batch_off, r_batch_off = self.transition_model(s_batch_off.reshape(-1,self.s_dim), a_batch_off, T_batch.repeat(self.n_m_actions))[:2]                
                 if self.transition_model_type in ['conditional', 'VQVAE']:
-                    s_batch_off = s_batch_off.reshape(-1,self.n_m_actions,self.s_dim).clone()
-                    r_batch_off = r_batch_off.reshape(-1,self.n_m_actions).clone()
+                    s_batch_off = s_batch_off.reshape(-1,self.n_m_actions,self.s_dim).detach()
+                    r_batch_off = r_batch_off.reshape(-1,self.n_m_actions).detach()
                 else:
-                    s_batch_off = s_batch_off.reshape(-1,self.n_m_actions,self.n_tasks,self.s_dim).clone()[np.arange(batch_size), :, T_batch, :]
-                    r_batch_off = r_batch_off.reshape(-1,self.n_m_actions,self.n_tasks).clone()[np.arange(batch_size), :, T_batch]                    
-                s_batch_off_flat = s_batch_off.reshape(-1,self.s_dim).clone()
-                R_batch_off += r_batch_off
+                    s_batch_off = s_batch_off.reshape(-1,self.n_m_actions,self.n_tasks,self.s_dim).detach()[np.arange(batch_size), :, T_batch, :]
+                    r_batch_off = r_batch_off.reshape(-1,self.n_m_actions,self.n_tasks).detach()[np.arange(batch_size), :, T_batch]                    
+                # s_batch_off_flat = s_batch_off.reshape(-1,self.s_dim).detach()
+                R_batch_off += r_batch_off.detach()
 
             # R_llhood = self.R_model.llhood(R_batch_off, s_upper_batch, T_batch)
             # torch.cuda.synchronize()
@@ -1124,259 +1024,8 @@ class Agent:
             # torch.cuda.synchronize()
 
             PS_s = self.concept_model.sample_m_state_and_posterior(s_upper_batch[:,self.n_dims_excluded:])[1]
-            self.meta_learning(PS_s, R_batch_off, T_batch, d_batch)           
+            self.meta_learning(PS_s.detach(), R_batch_off.detach(), T_batch)           
 
-    # def learn_concepts(self, only_metrics=False, upper_batch=[]):                                       
-    #     if not self.upper_memory.empty():
-    #         if len(upper_batch) == 0: 
-    #             upper_batch = self.upper_memory.sample(self.concept_batch_size) 
-    #             upper_batch = np.array(upper_batch)
-            
-    #         batch_size = upper_batch.shape[0]
-    #         baseline = np.log(batch_size)
-
-    #         T_upper_batch = upper_batch[:,-2].astype('int')
-    #         R_upper_batch = torch.FloatTensor(upper_batch[:,-1]).unsqueeze(1).to(device)
-            
-    #         s_upper_batches = []
-    #         a_upper_batches_off = []
-    #         log_Ptrajectory_A = torch.zeros(batch_size, self.n_m_actions).to(device)
-    #         for i in range(0, self.upper_level_period+1):
-    #             s_upper_batches.append(torch.FloatTensor(upper_batch[:, i*self.s_dim:(i+1)*self.s_dim]).to(device))
-    #             if i < self.upper_level_period:
-    #                 a_upper_batch = torch.FloatTensor(upper_batch[:, self.N_s_dim + i*self.a_dim : self.N_s_dim + (i+1)*self.a_dim]).to(device)
-    #                 log_Ptrajectory_A += self.actor.llhoods(s_upper_batches[-1], a_upper_batch).detach()
-    #                 a_upper_batches_off.append(self.actor.sample_actions(s_upper_batches[-1]))
-                    
-    #         # a_upper_batches_off = torch.cat(a_upper_batches_off, 2).view(-1,self.a_dim)
-    #         a_upper_batch_off = a_upper_batches_off[0].view(-1,self.a_dim)
-    #         s_batch_repeated = s_upper_batches[0].view(batch_size,1,self.s_dim).repeat(1,self.n_m_actions,1).view(-1,self.s_dim)
-
-    #         R_batch_off = self.reward_model(s_batch_repeated, a_upper_batch_off).view(-1,self.n_m_actions,self.n_tasks)[np.arange(batch_size),:,T_upper_batch].detach()
-    #         # if not only_metrics:
-    #         #     R_llhood = self.R_model.llhood(R_batch_off, s_upper_batches[0], T_upper_batch)
-    #         #     R_model_loss = -(R_llhood).mean() 
-    #         #     self.R_model.optimizer.zero_grad()
-    #         #     R_model_loss.backward()
-    #         #     clip_grad_norm_(self.R_model.parameters(), self.clip_value)
-    #         #     self.R_model.optimizer.step()
-    #         # upper_batch_2 = self.upper_memory.sample(self.concept_batch_size)
-    #         # s2_upper_batch = torch.FloatTensor(np.array(upper_batch_2)[:, 0: self.s_dim]).to(device)
-
-    #         # del upper_batch
-    #         # del upper_batch_2
-            
-    #         # I(s_t:S_t)
-    #         S, PS_s, log_PS_s = self.concept_model.sample_m_state_and_posterior(s_upper_batches[0])
-    #         PS = PS_s.mean(0).view(-1,1)
-    #         log_PS = -baseline + torch.logsumexp(log_PS_s, dim=0).view(-1,1)
-    #         HS = -(PS * log_PS).sum()
-    #         HS_s = -(PS_s * log_PS_s).sum(1).mean()
-    #         s_S_mutual_information = HS - HS_s
-
-    #         # PS_T = self.concept_model.prior.detach()/self.concept_model.prior_n
-    #         # PA_ST = torch.from_numpy(self.meta_actor).float().to(device)
-    #         # log_PAtrajectory_sST = a_llhoods_upper_batch_off.unsqueeze(1).unsqueeze(2) + torch.log(PA_ST + 1e-12).unsqueeze(0)
-    #         # log_Ptrajectory_sST = torch.logsumexp(log_PAtrajectory_sST + 1e-10, dim=3, keepdim=True)
-    #         # PA_trajectorysST = torch.exp(log_PAtrajectory_sST - log_Ptrajectory_sST)
-    #         # PA_trajectorysST /= PA_trajectorysST.sum(3, keepdim=True)
-    #         # PA_trajectorysT = (PA_trajectorysST * PS_T.unsqueeze(0).unsqueeze(3)).sum(2)[np.arange(batch_size),T_upper_batch,:]
-    #         # a_importance_ratios = torch.exp((a_llhoods_upper_batch_off - a_llhoods_upper_batch).clamp(-1e6,10))+1e-10
-    #         # if not only_metrics:
-    #         #     # Optimize reward network
-    #         #     R_llhood = self.reward_model.llhood(R_upper_batch, s_upper_batches[0], T_upper_batch)
-    #         #     R_model_loss = -(R_llhood * PA_trajectorysT.detach()).mean() 
-    #         #     self.reward_model.optimizer.zero_grad()
-    #         #     R_model_loss.backward()
-    #         #     clip_grad_norm_(self.reward_model.parameters(), self.clip_value)
-    #         #     self.reward_model.optimizer.step()
-
-    #         # I(R_t:S_t|T_t)
-    #         # Pr_ssAA_T = torch.exp(self.reward_model.sample_and_cross_llhood(s_upper_batches[0], T_upper_batch))
-    #         # assert len(Pr_ssAA_T.shape) == 4, 'P(R|s,A,T) is calculated incorrectly. Wrong size.'
-    #         # assert Pr_ssAA_T.size(0) == batch_size, 'P(R|s,A,T) is calculated incorrectly. Wrong dim 0.'
-    #         # assert Pr_ssAA_T.size(1) == batch_size, 'P(R|s,A,T) is calculated incorrectly. Wrong dim 1.'
-    #         # assert Pr_ssAA_T.size(2) == self.n_m_actions, 'P(R|s,A,T) is calculated incorrectly. Wrong dim 2.'
-    #         # assert Pr_ssAA_T.size(3) == self.n_m_actions, 'P(R|s,A,T) is calculated incorrectly. Wrong dim 2.'
-            
-    #         # policy_upper = self.meta_actor[T_upper_batch, :, :]
-    #         # policy_upper = torch.from_numpy(policy_upper).float().to(device)
-    #         # Pr_ssAS_T = torch.einsum('ikp,ijtp->ijkt', policy_upper, Pr_ssAA_T)
-    #         # cross_task_mask = (T_upper_batch.reshape(-1,1) == T_upper_batch.reshape(1,-1))*1.0
-    #         # cross_task_mask /= (cross_task_mask.sum(1, keepdims=True) + 1e-10)
-    #         # cross_task_mask = torch.from_numpy(cross_task_mask).float().to(device)
-    #         # Pr_ssAS_T_valid = Pr_ssAS_T * cross_task_mask.unsqueeze(2).unsqueeze(3)            
-    #         # Pr_sSA_T_unnormalized = torch.einsum('ijkt,jk->ikt', Pr_ssAS_T_valid, PS_s)
-
-    #         # task_mask = torch.zeros(batch_size, self.n_tasks).float().to(device)
-    #         # task_mask[np.arange(batch_size), T_upper_batch] = torch.ones(batch_size).float().to(device)
-    #         # task_count = task_mask.sum(0).view(-1,1)  
-    #         # PS_s_classified_in_task = torch.zeros(batch_size, self.n_tasks, self.n_m_states).float().to(device)
-    #         # PS_s_classified_in_task[np.arange(batch_size), T_upper_batch, :] = PS_s
-    #         # PS_T = PS_s_classified_in_task.sum(0) / (task_count + 1e-10)
-
-    #         # # S_probability_given_T = self.concept_model.prior[T_upper_batch, :]/self.concept_model.prior_n            
-    #         # # Pr_sSA_T = Pr_sSA_T_unnormalized / (S_probability_given_T.unsqueeze(2) + 1e-10)
-    #         # Pr_sSA_T = Pr_sSA_T_unnormalized / (PS_T[T_upper_batch, :].unsqueeze(2) + 1e-10)
-    #         # Pr_sA_T = Pr_sSA_T_unnormalized.sum(1, keepdim=True)
-            
-    #         # HS_RT = -(policy_upper * PS_s.unsqueeze(2) * torch.log(Pr_sSA_T + 1e-10)).sum((1,2)).view(-1,1)
-    #         # HS_T = -(policy_upper * PS_s.unsqueeze(2) * torch.log(Pr_sA_T + 1e-10)).sum((1,2)).view(-1,1)  
-    #         # R_S_mutual_information = HS_T - HS_RT   
-             
-    #         # I(R_t:S_t|T_t)
-    #         log_PR_spApT_sA = self.R_model.llhood(R_batch_off, s_upper_batches[0], T_upper_batch, cross=True)
-    #         PA_ST = torch.from_numpy(self.meta_actor).float().to(device)
-    #         PSA_sT = PS_s.unsqueeze(2) * PA_ST[T_upper_batch,:,:]
-    #         log_PSR_spT_sA = torch.logsumexp(torch.log(PSA_sT + 1e-10).unsqueeze(1).unsqueeze(4) + log_PR_spApT_sA.unsqueeze(2), dim=3)
-
-    #         task_mask = torch.zeros(batch_size, self.n_tasks).float().to(device)
-    #         task_mask[np.arange(batch_size), T_upper_batch] = torch.ones(batch_size).float().to(device)
-    #         task_count = task_mask.sum(0).view(-1,1)
-    #         task_mask /= (task_count.view(1,-1) + 1e-10)
-    #         PS_s_classified_in_task = (1e-10)*torch.ones(batch_size, self.n_tasks, self.n_m_states).float().to(device)
-    #         PS_s_classified_in_task[np.arange(batch_size), T_upper_batch, :] = PS_s
-    #         PS_T = PS_s_classified_in_task.sum(0) / (task_count + 1e-10)
-    #         PS_T /= PS_T.sum(1, keepdim=True).detach()
-            
-    #         cross_task_mask = (T_upper_batch.reshape(-1,1) == T_upper_batch.reshape(1,-1))*1.0
-    #         cross_task_mask /= (cross_task_mask.sum(1, keepdims=True) + 1e-10)
-    #         cross_task_mask = torch.from_numpy(cross_task_mask).float().to(device)
-    #         log_PR_ST_sA_unnormalized = torch.logsumexp(torch.log(cross_task_mask + 1e-10).unsqueeze(2).unsqueeze(3) + log_PSR_spT_sA, dim=0)
-    #         log_PR_ST_sA = log_PR_ST_sA_unnormalized - torch.log(PS_T[T_upper_batch, :] + 1e-10).unsqueeze(2)
-    #         log_PR_T_sA = torch.logsumexp(log_PR_ST_sA_unnormalized, dim=1)
-
-    #         PA_s_T = PSA_sT.sum(1)
-    #         HS_T = -(PA_s_T * log_PR_T_sA).sum(1).mean()
-    #         HS_RT = -(PSA_sT * log_PR_ST_sA).sum((1,2)).mean()  
-    #         R_S_mutual_information = HS_T - HS_RT    
-            
-    #         # I(S_t+1:S_t|A_t,T_t)
-    #         # assert torch.all(a_importance_ratios != float('inf')), 'Infinite lklhoods'
-    #         trajectory_weights_A = torch.exp(log_Ptrajectory_A - torch.logsumexp(log_Ptrajectory_A + 1e-10, dim=0, keepdim=True))
-    #         trajectory_weights_A /= trajectory_weights_A.sum(0, keepdim=True)
-    #         filtered_weights = (trajectory_weights_A.unsqueeze(1) * task_mask.unsqueeze(2)).detach()
-    #         filtered_weights /= (filtered_weights.sum(0, keepdim=True) + 1e-10)
-    #         nS, PnS_ns = self.concept_model.sample_m_state_and_posterior(s_upper_batches[-1])[0:2]
-    #         PnS_SAT_unnormalized = ((filtered_weights.unsqueeze(2).unsqueeze(4) * PS_s.unsqueeze(1).unsqueeze(3).unsqueeze(4) * PnS_ns.unsqueeze(1).unsqueeze(2).unsqueeze(3))).sum(0)
-    #         PnS_SAT = PnS_SAT_unnormalized / (PS_T.unsqueeze(2).unsqueeze(3) + 1e-10)
-
-    #         PA_T = (PA_ST * PS_T.unsqueeze(2)).sum(1, keepdim=True)
-    #         PnS_AT = torch.einsum('hjkl,hjk->hkl', PnS_SAT_unnormalized, PA_ST/(PA_T + 1e-10))
-
-    #         PTSAnS = (PS_T.unsqueeze(2) * PA_ST).unsqueeze(3) * PnS_SAT * task_count.view(-1,1,1,1) / batch_size
-    #         PTAnS = PTSAnS.sum(1)
-    #         HnS_SAT = -(PTSAnS * torch.log(PnS_SAT + 1e-10)).sum()
-    #         HnS_AT = -(PTAnS * torch.log(PnS_AT + 1e-10)).sum()
-    #         nS_S_mutual_information = HnS_AT - HnS_SAT
-
-    #         # PS = (self.concept_model.prior.detach()/self.concept_model.prior_n).mean(0).view(-1,1)
-    #         # PA_S = PA_ST.mean(0)
-    #         # PAS = PA_S * PS
-    #         # PA = PAS.sum(0)    
-
-    #         # assert torch.all(PS==PS), 'Problems with prior'
-    #         # assert torch.all(PA_S==PA_S), 'Problems with PA_S'
-    #         # assert torch.all(PAS==PAS), 'Problems with PAS'
-    #         # assert torch.all(PA==PA), 'Problems with PA'
-
-    #         # PnS_SA = PnS_SA_unnormalized / (PS.unsqueeze(2) + 1e-10)
-    #         # PnS_SA /= (PnS_SA.sum(2, keepdim=True) + 1e-10)
-    #         # PnSSA = PnS_SA * PAS.unsqueeze(2) 
-    #         # PnS_A = PnSSA.sum(0) / (PA.unsqueeze(1) + 1e-10)
-
-    #         # assert torch.all(PnS_SA==PnS_SA), 'Problems with model'
-    #         # assert torch.all(PnS_A==PnS_A), 'Problems with model 2'
-            
-    #         # HnS_SAT = -(PnSSA * torch.log(PnS_SA + 1e-10)).sum()
-    #         # HnS_AT = -(PnSSA.sum(0) * torch.log(PnS_A + 1e-10)).sum()
-    #         # nS_S_mutual_information = HnS_AT - HnS_SAT
-
-    #         PA_sT = torch.einsum('hjk,ij->ikh', PA_ST, PS_s)
-    #         HA_sT = -(PA_sT * torch.log(PA_sT + 1e-12)).sum(1)
-
-    #         disentanglement_metric = self.beta_Ss*s_S_mutual_information + self.beta_SR*R_S_mutual_information + self.beta_nSSA*nS_S_mutual_information
-
-    #         if not only_metrics:
-    #             trajectory_weights_A_not_lossy = torch.exp(log_Ptrajectory_A - torch.logsumexp(torch.logsumexp(log_Ptrajectory_A + 1e-10, dim=0, keepdim=True), dim=1, keepdim=True))
-    #             trajectory_weights_A_not_lossy /= trajectory_weights_A_not_lossy.sum()
-    #             filtered_weights_not_lossy = (trajectory_weights_A_not_lossy.unsqueeze(1) * task_mask.unsqueeze(2)).detach()
-    #             filtered_weights_not_lossy /= (filtered_weights_not_lossy.sum() + 1e-10)
-    #             self.meta_learning(S, nS, R_upper_batch, filtered_weights_not_lossy)                       
-
-    #         # Inconsitency metric
-    #         S_upper_posteriors = [(PS_s, log_PS_s)]
-    #         posterior_inconsistency = torch.zeros_like(PS_s)
-    #         for s_batch in s_upper_batches[1:]:
-    #             S_upper_posteriors.append(self.concept_model.sample_m_state_and_posterior(s_batch)[1:])
-    #             if self.inconsistency_metric == 'poly':
-    #                 posterior_inconsistency += (2*(S_upper_posteriors[-1][0] - S_upper_posteriors[-2][0].detach()))**4
-    #             else:
-    #                 posterior_inconsistency += S_upper_posteriors[-2][0].detach()*(S_upper_posteriors[-2][1].detach() - S_upper_posteriors[-1][1] + 10.0*S_upper_posteriors[-1][0])
-
-    #         if self.inconsistency_metric == 'poly':
-    #             inconsistency_metric = self.zeta * posterior_inconsistency.mean(1, keepdim=True)
-    #         else:
-    #             inconsistency_metric = self.zeta * posterior_inconsistency.sum(1, keepdim=True)
-
-    #         # Action divergence
-    #         point_distributions = self.estimate_macro_policies(s_upper_batches[0])  
-    #         KL_divergence_Pis_Pi_ST = (point_distributions.transpose(1,2).unsqueeze(2) * (torch.log(point_distributions.transpose(1,2).unsqueeze(2) + 1e-10) - torch.log(PA_ST.unsqueeze(0) + 1e-10))).sum(3)
-    #         KL_divergence_Pi_Pis_ST = (PA_ST.unsqueeze(0) * (torch.log(PA_ST.unsqueeze(0) + 1e-10) - torch.log(point_distributions.transpose(1,2).unsqueeze(2) + 1e-10))).sum(3)
-    #         JS_divergence_Pi_Pis_ST = 0.5 * (KL_divergence_Pis_Pi_ST + KL_divergence_Pi_Pis_ST)
-    #         JS_divergence_Pi_Pis_S = torch.einsum('ihj,hj->ij', JS_divergence_Pi_Pis_ST, PS_T/self.n_tasks)
-    #         JS_divergence_Pi_Pis = torch.einsum('ij,ij->i', JS_divergence_Pi_Pis_S, PS_s/(PS.view(1,-1)+1e-10))
-    #         action_divergence_metric = self.beta_nSA * JS_divergence_Pi_Pis.view(-1,1)
-    #         # action_KL_divergence = (point_distributions.unsqueeze(1) * (torch.log(point_distributions.unsqueeze(1) + 1e-12) - torch.log(point_distributions.unsqueeze(0) + 1e-12))).sum(2)
-    #         # P_S_T = self.concept_model.prior.transpose(0,1)/self.concept_model.prior_n
-    #         # macro_state_correlation = ((PS_s.unsqueeze(2) * PS_T.transpose(0,1).unsqueeze(0)).unsqueeze(1) * PS_s.unsqueeze(0).unsqueeze(3) / (PS.view(1,1,-1,1) + 1e-10)**2).sum(2)
-    #         # action_divergence_metric = self.beta_nSA * (0.5 * macro_state_correlation * action_KL_divergence.detach()).mean(2).mean(1, keepdim=True)
-
-    #         # Optimize concept networks
-    #         if not only_metrics:   
-    #             assert torch.all(action_divergence_metric==action_divergence_metric), 'Problems with D1'
-    #             assert torch.all(inconsistency_metric==inconsistency_metric), 'Problems D2'  
-    #             assert torch.all(disentanglement_metric==disentanglement_metric), 'Problems D3'                          
-    #             concept_model_loss = (action_divergence_metric + inconsistency_metric - disentanglement_metric + 0.01*((self.alpha.view(1,-1) + self.mu.view(1,-1)) * HA_sT).mean(1, keepdim=True)).mean()
-    #             self.concept_model.optimizer.zero_grad()
-    #             concept_model_loss.backward()
-    #             clip_grad_norm_(self.concept_model.parameters(), self.clip_value)
-    #             self.concept_model.optimizer.step()
-    #             assert torch.all(self.concept_model.l1.weight==self.concept_model.l1.weight), 'Invalid concept model parameters'
-
-    #     else:
-    #         PS_s = torch.zeros(1,1).to(device)
-    #         HS = torch.zeros(1).to(device)
-    #         HS_s = torch.zeros(1).to(device)
-    #         s_S_mutual_information = torch.zeros(1).to(device)
-    #         HnS_AT = torch.zeros(1).to(device)
-    #         HnS_SAT = torch.zeros(1).to(device)                    
-    #         nS_S_mutual_information = torch.zeros(1).to(device)
-    #         HS_RT = torch.zeros(1).to(device)
-    #         HS_T = torch.zeros(1).to(device)
-    #         R_S_mutual_information = torch.zeros(1).to(device)
-    #         disentanglement_metric = torch.zeros(1).to(device)  
-    #         inconsistency_metric = torch.zeros(1).to(device)
-    #         action_divergence_metric = torch.zeros(1).to(device)          
-
-    #     if only_metrics:
-    #         metrics = {
-    #             'n concepts': len(np.unique(PS_s.argmax(1).detach().cpu().numpy())),
-    #             'H(S)': HS.mean().detach().cpu().numpy(),
-    #             'H(S|s)': HS_s.mean().detach().cpu().numpy(),
-    #             'I(S:s)': s_S_mutual_information.mean().detach().cpu().numpy(), 
-    #             'H(R|S,T)': HS_RT.mean().detach().cpu().numpy(),
-    #             'H(R|T)': HS_T.mean().detach().cpu().numpy(),
-    #             'I(R:S|T)': R_S_mutual_information.mean().detach().cpu().numpy(),
-    #             'H(nS|A)': HnS_AT.mean().detach().cpu().numpy(),
-    #             'H(nS|S,A)': HnS_SAT.mean().detach().cpu().numpy(),
-    #             'I(nS:S|A,T)': nS_S_mutual_information.mean().detach().cpu().numpy(),
-    #             'D1': disentanglement_metric.mean().detach().cpu().numpy(),
-    #             'D2': inconsistency_metric.mean().detach().cpu().numpy(),
-    #             'D3': action_divergence_metric.mean().detach().cpu().numpy()
-    #         }
-            
-    #         return metrics
 
     def learn_concepts(self, only_metrics=False, batch=[]):
         if not self.memory.empty():
@@ -1390,15 +1039,17 @@ class Agent:
             T_batch = batch[:,self.sarsd_dim+1].astype('int')
             s_upper_batch = torch.FloatTensor(batch[:,:self.s_dim]).to(device)
             s_upper_batch_prop = s_upper_batch[:,self.n_dims_excluded:]
+
+            del batch
             
             s_upper_batches_off = []
             s_upper_batches_off.append(s_upper_batch.view(batch_size,1,self.s_dim).repeat(1,self.n_m_actions,1))
             a_upper_batches_off = []
             R_batch_off = torch.zeros(batch_size,self.n_m_actions).float().to(device)
             
-            t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
-            t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
-            z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
+            # t_mask = torch.zeros(batch_size*self.n_m_actions, self.n_tasks).to(device)
+            # t_mask[np.arange(batch_size*self.n_m_actions), T_batch.repeat(self.n_m_actions).reshape(-1)] = torch.ones(batch_size*self.n_m_actions,).to(device)
+            # z_batch = self.latent_prior.sample(t_mask).view(-1,self.upper_level_period,self.transition_model.latent_dim)
 
             for i in range(0, self.upper_level_period):
                 a_upper_batches_off.append(self.actor.sample_actions(s_upper_batches_off[-1][:,:,self.n_dims_excluded:], repeat=False).detach())
@@ -1406,15 +1057,15 @@ class Agent:
                 # s_upper_batches_off.append(self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim)).detach().view(-1,self.n_m_actions,self.n_tasks,self.s_dim)[np.arange(batch_size),:,T_batch,:])
                 # self.transition_model.eval()
 
-                if self.transition_model_type == 'VQVAE':
-                    z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
-                    z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
-                    z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
-                    z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
-                else:
-                    z=z_batch[:,i,:]
+                # if self.transition_model_type == 'VQVAE':
+                #     z_matrix = z_batch[:,i,:].contiguous().view(batch_size*self.n_m_actions, self.transition_model.n_channels, -1).detach().cpu().numpy()
+                #     z_numpy = np.concatenate([np.zeros([z_matrix.shape[0], z_matrix.shape[1], 16-(self.transition_model.latent_dim//self.transition_model.n_channels)]),z_matrix],2).astype('uint8')
+                #     z_numpy_packed = np.packbits(z_numpy, axis = 2).astype('int')
+                #     z = torch.from_numpy(z_numpy_packed[:,:,1]+256*z_numpy_packed[:,:,0]).long().to(device) 
+                # else:
+                #     z=z_batch[:,i,:]
                 
-                s_batch_off, r_batch_off = self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim), T_batch.repeat(self.n_m_actions), z=z)[0:2]
+                s_batch_off, r_batch_off = self.transition_model(s_upper_batches_off[-1].view(-1,self.s_dim), a_upper_batches_off[-1].view(-1,self.a_dim), T_batch.repeat(self.n_m_actions))[0:2]
                 if self.transition_model_type in ['conditional', 'VQVAE']:
                     s_batch_off = s_batch_off.view(-1,self.n_m_actions,self.s_dim)
                     r_batch_off = r_batch_off.view(-1,self.n_m_actions)
@@ -1443,62 +1094,33 @@ class Agent:
             q_saT_A = torch.min(torch.stack([q1_saT_A, q2_saT_A]), 0)[0]
             q_saT_A = q_saT_A.view(-1, self.n_m_actions, self.n_tasks)[np.arange(batch_size),:,T_batch]
 
-            v_sT = self.baseline(s_upper_batches_off[0].detach().view(-1,self.s_dim)[:,self.n_dims_excluded:]).view(-1, self.n_m_actions, self.n_tasks)[np.arange(batch_size),:,T_batch]
-            adv_saT_A = q_saT_A - v_sT
+            v_sT = self.baseline(s_upper_batch_prop)[np.arange(batch_size),T_batch]
+            adv_saT_A = q_saT_A - v_sT.unsqueeze(1)
 
             PA_STi = torch.from_numpy(self.meta_actor).float()[T_batch, :, :].to(device)
             adv_sST = torch.einsum('ijk,ik->ij', PA_STi, adv_saT_A)
             
             S, PS_s, log_PS_s = self.concept_model.sample_m_state_and_posterior(s_upper_batch_prop)
             adv_sT = (PS_s * adv_sST.detach()).sum(1)
-            adv_sT_centered = (PS_s * center(adv_sST).detach()).sum(1)
-            adv_sT_centered_log = (log_PS_s * center(adv_sST).detach()).sum(1)
-            J0 = adv_sT_centered_log.mean()
+            J0 = adv_sT.mean()
+
+            PA_T_tilde = torch.einsum('ik,ih->hk', torch.exp(self.beta_empiric_policy * (adv_saT_A - adv_saT_A.max(1, keepdim=True)[0])), R_task_mask)
+            PA_T_tilde = PA_T_tilde / PA_T_tilde.sum(1, keepdim=True)
+            self.empiric_policy = ((1.0-self.forgetting_factor_empiric_policy) * self.empiric_policy + self.forgetting_factor_empiric_policy * PA_T_tilde).detach()
+            HA_T_tilde = -(self.empiric_policy * torch.log(self.empiric_policy + 1e-10)).sum(1, keepdim=True)
 
             # I(s_t:S_t)
-            PS_T = self.concept_model.prior/self.concept_model.prior_n
+            PS_T_tilde = torch.einsum('ij,ih->hj', PS_s, R_task_mask)
+            PS_T_tilde = PS_T_tilde / PS_T_tilde.sum(1, keepdim=True).detach()
+            self.concept_prior = ((1.0-self.forgetting_factor_empiric_policy) * self.concept_prior + self.forgetting_factor_empiric_policy * PS_T_tilde).detach()
+            PS_T = self.concept_prior.detach()
             PS = PS_T.mean(0).view(1,-1)
             log_PS = torch.log(PS + 1e-12)
             # log_PS = -baseline + torch.logsumexp(log_PS_s, dim=0).view(1,-1)
 
-            HS = -(PS_s * log_PS.detach()).sum(1).mean()
-            HS_s = -(PS_s * log_PS_s.detach()).sum(1).mean()
-            HS_s_centered = -(PS_s * log_PS_s.detach()).sum(1).mean()
+            HS = -(PS * log_PS).sum(1).mean()
+            HS_s = -(PS_s * log_PS_s).sum(1).mean()
             s_S_mutual_information = HS - HS_s
-
-            lS = -log_PS / ((-log_PS).max() + 1e-12)
-            lS /= lS.sum()
-            HS_scaled = (log_PS_s * (self.entropy_scale * adv_sT_centered.abs().view(-1,1) * center(lS)).detach()).sum(1).mean()
-
-            # # I(ns_t:nS_t)
-            # nS, PnS_ns, log_PnS_ns = self.concept_model.sample_m_state_and_posterior(s_upper_batches_off[-1].view(-1,self.s_dim))
-            # PnS = PnS_ns.mean(0).view(-1,1)
-            # log_PnS = -baseline + torch.logsumexp(log_PnS_ns, dim=0).view(-1,1)
-
-            # HnS = -(PnS_ns * log_PnS.detach()).sum(1).mean()
-            # HnS_ns = -(PnS_ns * log_PnS_ns.detach()).sum(1).mean()
-            # ns_nS_mutual_information = HnS - HnS_ns
-
-            # PnS_SA_unnormalized = (PS_s.unsqueeze(2).unsqueeze(3) * PnS_ns.unsqueeze(1)).mean(0)
-            # PnS_SA = PnS_SA_unnormalized / (PnS_SA_unnormalized.sum(2, keepdim=True).detach() + 1e-10)
-
-            # PS_T = self.concept_model.prior/self.concept_model.prior_n
-            # PT_S = PS_T * PT
-            # PT_S /= (PT_S.sum(0, keepdim=True).detach() + 1e-10)
-            # PA_ST = torch.from_numpy(self.meta_actor).float().to(device)
-            # PA_S = (PA_ST * PT_S.unsqueeze(2)).sum(0)
-            # PSA = PA_S * PS
-            # PS_A = PSA / (PSA.sum(0, keepdim=True) + 1e-10)
-           
-            # PSAnS = PnS_SA * PSA.unsqueeze(2)
-            # PnS_A = (PnS_SA * PS_A.unsqueeze(2)).sum(0)
-            # PnS_S = (PnS_SA * PA_S.unsqueeze(2)).sum(1)
-
-            # HnS_SAT = -(PSAnS * torch.log(PnS_SA + 1e-10)).sum()
-            # HnS_AT = -(PSAnS.sum(0) * torch.log(PnS_A + 1e-10)).sum()
-            # HnS_ST = -(PSAnS.sum(1) * torch.log(PnS_S + 1e-10)).sum()
-            # nS_S_mutual_information = HnS_AT - HnS_SAT
-            # nS_A_mutual_information = HnS_ST - HnS_SAT
 
             # I(R_t+N:S_t|T_t)
             # log_PR_spApT_sA = self.R_model.llhood(R_batch_off, s_upper_batch, T_batch, cross=True)
@@ -1534,14 +1156,11 @@ class Agent:
             PS_hat = PS_s.mean(0).view(1,-1)
             log_PS_RT_i_adjusted = log_PS_RT_i * PS_T[T_batch, :] / (PS_hat + 1e-12)
 
-            HS_T = -(PS_s * log_PS_T.detach()).sum(1).mean()
+            HS_fT = -(PS_T * torch.log(PS_T + 1e-10)).sum(1, keepdim=True)
+            HS_T = HS_fT.mean()
+            HS_T_tilde = -(PS_T_tilde * torch.log(PS_T_tilde + 1e-10)).sum(1, keepdim=True)
             HS_RT = -(PS_s * log_PS_RT_i_adjusted.detach()).sum(1).mean()
-            HS_RT_centered = -(PS_s * log_PS_RT_i_adjusted.detach()).sum(1).mean()
             R_S_mutual_information = HS_T - HS_RT
-
-            lS_T = -log_PS_T / ((-log_PS_T).max(1, keepdim=True)[0] + 1e-12)
-            lS_T /= lS_T.sum(1, keepdim=True)
-            HS_T_scaled = (log_PS_s * (self.entropy_scale *  adv_sT_centered.abs().view(-1,1) * center(lS_T)).detach()).sum(1).mean()
 
             # I(A:T|s)
             PT_S = PS_T.mean(1, keepdim=True)
@@ -1558,16 +1177,10 @@ class Agent:
 
             HA_s = -(PS_s * mean_log_PA_s_S.detach()).sum(1).mean()
             HA_sT = -(PS_s * mean_log_PA_sT_S.detach()).sum(1).mean()
-            HA_sT_centered = -(PS_s * mean_log_PA_sT_S.detach()).sum(1).mean()
             A_T_mutual_information = HA_s - HA_sT
 
-            lA_s = -mean_log_PA_s_S / ((-mean_log_PA_s_S).max(1, keepdim=True)[0] + 1e-12)
-            lA_s /= lA_s.sum(1, keepdim=True)
-            HA_s_scaled = (log_PS_s * (self.entropy_scale *  adv_sT_centered.abs().view(-1,1) * center(lA_s)).detach()).sum(1).mean()
-
             # PS constraint term
-            entropy_scale = self.entropy_scale *  adv_sT_centered.abs().view(-1,1) * self.eta_PS.view(1,-1)
-            PS_constraint = (log_PS_s * center(entropy_scale).detach()).sum(1).mean()
+            PS_constraint = (log_PS_s * self.eta_PS.view(1,-1).detach()).sum(1).mean()
 
             # # Task mask
             # task_mask = torch.zeros(batch_size, self.n_tasks).float().to(device)
@@ -1601,29 +1214,20 @@ class Agent:
             # PnS_ST = (PnS_SAT * PA_ST.unsqueeze(3)).sum(2)
 
             HnS_SAT = -(PS_s * mean_log_PnS_SATi_S.detach()).sum(1).mean()
-            HnS_SAT_centered = -(PS_s * mean_log_PnS_SATi_S.detach()).sum(1).mean()
             HnS_AT = -(PS_s * mean_log_PnS_ATi_S.detach()).sum(1).mean()
             HnS_ST = -(PS_s * mean_log_PnS_STi_S.detach()).sum(1).mean()
             nS_S_mutual_information = HnS_AT - HnS_SAT
             nS_A_mutual_information = HnS_ST - HnS_SAT
-
-            lnS_AT = -mean_log_PnS_ATi_S / ((-mean_log_PnS_ATi_S).max(1, keepdim=True)[0] + 1e-12)
-            lnS_AT /= lnS_AT.sum(1, keepdim=True)
-            HnS_AT_scaled = (log_PS_s * (self.entropy_scale *  adv_sT_centered.abs().view(-1,1) * center(lnS_AT)).detach()).sum(1).mean() 
-
-            lnS_ST = -mean_log_PnS_STi_S / ((-mean_log_PnS_STi_S).max(1, keepdim=True)[0] + 1e-12)
-            lnS_ST /= lnS_ST.sum(1, keepdim=True)
-            HnS_ST_scaled = (log_PS_s * (self.entropy_scale *  adv_sT_centered.abs().view(-1,1) * center(lnS_ST)).detach()).sum(1).mean()
 
             # print('HS_scaled: '+str(np.round(HS_scaled.item(),2)))
             # print('HS_T_scaled: '+str(np.round(HS_T_scaled.item(),2)))
             # print('HA_s_scaled: '+str(np.round(HA_s_scaled.item(),2)))
             # print('HnS_AT_scaled: '+str(np.round(HnS_AT_scaled.item(),2)))
             # print('HnS_ST_scaled: '+str(np.round(HnS_ST_scaled.item(),2)))
-            # print('HS_s_centered: '+str(np.round(HS_s_centered.item(),2)))
-            # print('HS_RT_centered: '+str(np.round(HS_RT_centered.item(),2)))
-            # print('HnS_SAT_centered: '+str(np.round(HnS_SAT_centered.item(),2)))
-            # print('HA_sT_centered: '+str(np.round(HA_sT_centered.item(),2)))
+            # print('HS_s: '+str(np.round(HS_s.item(),2)))
+            # print('HS_RT: '+str(np.round(HS_RT.item(),2)))
+            # print('HnS_SAT: '+str(np.round(HnS_SAT.item(),2)))
+            # print('HA_sT: '+str(np.round(HA_sT.item(),2)))
             # print('PS_constraint: '+str(np.round(PS_constraint.item(),2)))
             # print('beta_Ss: '+str(np.round(self.beta_Ss,2)))
             # print('beta_SR: '+str(np.round(self.beta_SR,2)))
@@ -1633,9 +1237,7 @@ class Agent:
             # print('log_PS_RT_i min: '+str(np.round(log_PS_RT_i.min().item(),2)))
             
             # Information-theoretic metric
-            disentanglement_metric = ( HS_scaled + HS_T_scaled + HA_s_scaled + HnS_AT_scaled + HnS_ST_scaled
-                                        - self.beta_Ss*HS_s_centered - self.beta_SR*HS_RT_centered - self.beta_nSSA*HnS_SAT_centered - self.beta_AT*HA_sT_centered 
-                                        - PS_constraint )
+            disentanglement_metric = ((self.beta_ST.view(-1,1)*HS_T_tilde).sum() - self.beta_Ss*HS_s - self.beta_SR*HS_RT - self.beta_nSSA*HnS_SAT - self.beta_AT*HA_sT + PS_constraint )
             
             # Inconsitency metric
             S_upper_posteriors = [PS_s.view(-1,1,self.n_m_states).repeat(1,self.n_m_actions,1)]
@@ -1651,16 +1253,13 @@ class Agent:
             
             action_divergence_metric = torch.zeros(1).to(device)
 
-            # beta_Ss_gradient = -torch.log(self.threshold_entropy_beta_Ss/(HS_s.abs()+1e-12) + 1e-12).detach()
-            # beta_SR_gradient = -torch.log(self.threshold_entropy_beta_SR/(HS_RT.abs()+1e-12) + 1e-12).detach()
-            # beta_nSSA_gradient = -torch.log(self.threshold_entropy_beta_nSSA/(HnS_SAT.abs()+1e-12) + 1e-12).detach() 
-            # beta_AT_gradient = -torch.log(self.threshold_entropy_beta_AT/(HA_sT.abs()+1e-12) + 1e-12).detach()
-            # eta_PS_gradient = -torch.log(PS.view(-1)/self.PS_min + 1e-12).detach()
             beta_Ss_gradient = (HS_s - self.threshold_entropy_beta_Ss).item()
             beta_SR_gradient = (HS_RT - self.threshold_entropy_beta_SR).item()
             beta_nSSA_gradient = (HnS_SAT - self.threshold_entropy_beta_nSSA).item()
             beta_AT_gradient = (HA_sT - self.threshold_entropy_beta_AT).item()
             eta_PS_gradient = self.PS_min - PS.view(-1).detach()
+            
+            beta_ST_gradient = (HA_T_tilde - HS_fT).squeeze(1).detach()
 
             # Optimize concept networks
             if not only_metrics:   
@@ -1673,7 +1272,7 @@ class Agent:
                 concept_model_loss.backward()
                 clip_grad_norm_(self.concept_model.parameters(), self.clip_value)
                 self.concept_model.optimizer.step()
-                assert torch.all(self.concept_model.l1.weight==self.concept_model.l1.weight), 'Invalid concept model parameters'
+                # assert torch.all(self.concept_model.l1.weight==self.concept_model.l1.weight), 'Invalid concept model parameters'
 
                 # Optimize eta_PS
                 log_eta_PS = torch.log(self.eta_PS + 1e-12)
@@ -1696,6 +1295,10 @@ class Agent:
                 log_beta_AT = np.log(self.beta_AT + 1e-12)
                 log_beta_AT += self.tau_beta_AT * beta_AT_gradient
                 self.beta_AT = np.exp(log_beta_AT).clip(1e-10, 1e+4)
+
+                log_beta_ST = torch.log(self.beta_ST + 1e-12)
+                log_beta_ST += self.tau_beta_ST * beta_ST_gradient
+                self.beta_ST = torch.exp(log_beta_ST).clamp(1e-10, 1e+4)
 
         else:
             PS_s = torch.zeros(1,1).to(device)
@@ -1803,11 +1406,11 @@ class Agent:
         else:
             if self.bottom_level_epsds % (self.skill_steps + self.concept_steps) < self.skill_steps:
                 self.learn_skills()
-                self.learn_prior()
+                # self.learn_prior()
                 if self.reward_learning == 'always':
                     self.learn_reward()                               
             else:    
-                self.learn_prior()            
+                # self.learn_prior()            
                 self.learn_reward()
                 self.learn_concepts()
                 
@@ -1819,6 +1422,10 @@ class Agent:
         self.params['alpha'] = self.alpha
         self.params['eta_PS'] = self.eta_PS
         self.params['mu'] = self.mu
+        self.params['beta_Ss'] = self.beta_Ss       
+        self.params['beta_SR'] = self.beta_SR 
+        self.params['beta_nSSA'] = self.beta_nSSA
+        self.params['beta_AT'] = self.beta_AT
         if self.transition_model_type in ['conditional', 'SimPLe']:
             self.params['C_0'] = self.transition_model.C
         pickle.dump(self.params,open(common_path+'/agent_params.p','wb'))
@@ -1838,8 +1445,9 @@ class Agent:
         
         if self.hierarchical:
             torch.save(self.concept_model.state_dict(), specific_path+'_concept_model.pt')
-            pickle.dump(self.concept_model.prior, open(specific_path+'_prior.pt','wb'))
+            pickle.dump(self.concept_prior, open(specific_path+'_prior.pt','wb'))
             pickle.dump(self.upper_transition_model, open(specific_path+'_upper_transition_model.pt','wb'))
+            pickle.dump(self.empiric_policy,open(specific_path+'_empiric_policy.p','wb'))
             # torch.save(self.concept_critic.state_dict(), specific_path+'_concept_critic.pt')
             # torch.save(self.reward_model.state_dict(), specific_path+'_reward_model.pt')
             torch.save(self.transition_model.state_dict(), specific_path+'_transition_model.pt')
@@ -1896,15 +1504,16 @@ class Agent:
             self.transition_model.eval()
 
             if not transfer:
-                self.concept_model.prior = pickle.load(open(specific_path+'_prior.pt','rb'))
-                self.upper_transition_model = pickle.load(open(specific_path+'_upper_transition_model.pt','rb'))            
+                self.concept_prior = pickle.load(open(specific_path+'_prior.pt','rb')).to(device)
+                self.upper_transition_model = pickle.load(open(specific_path+'_upper_transition_model.pt','rb')).to(device)
+                self.empiric_policy = pickle.load(open(specific_path+'_empiric_policy.p','rb')).to(device)          
                 #self.reward_model.load_state_dict(torch.load(specific_path+'_reward_model.pt'))
                 
                 # self.R_model.load_state_dict(torch.load(specific_path+'_R_model.pt'))
 
                 if self.multitask:
-                    self.meta_actor = pickle.load(open(specific_path+'_meta_actor.p','rb'))
-                    self.meta_critic1 = pickle.load(open(specific_path+'_meta_critic.p','rb'))
+                    self.meta_actor = pickle.load(open(specific_path+'_meta_actor.p','rb')).to(device)
+                    self.meta_critic1 = pickle.load(open(specific_path+'_meta_critic.p','rb')).to(device)
                     # self.meta_critic2 = self.meta_critic1.copy()
                     # if load_upper_memory:  
                     #     # self.upper_memory = pickle.load(open(common_path+'/upper_memory.p','rb'))
@@ -2145,13 +1754,25 @@ class System:
         return event, done
     
     def train_agent(self, tr_epsds, epsd_steps, initialization=True, eval_epsd_interval=10, eval_epsds=12, iter_=0, save_progress=True, common_path='', 
-        rewards=[], goal_rewards=[], metrics=[], learn_lower=True, transfer=False):        
+        rewards=[], goal_rewards=[], metrics=[], learn_lower=True, transfer=False, model_iter=10000, model_epsd_interval=10):        
         if self.render:
             self.envs[self.task].render()
 
         if initialization:
             # self.initialization()
             self.initialization(epsd_steps)
+
+            stdscr = curses.initscr()
+            curses.noecho()
+            curses.cbreak()
+
+            for i in range(0, 10*model_iter):
+                self.agent.learn_transition_model(i, stdscr)
+
+            curses.echo()
+            curses.nocbreak()
+            curses.endwin()
+
             specific_path = common_path + '/' + str(0)
             self.save(common_path, specific_path)
 
@@ -2212,6 +1833,24 @@ class System:
                     specific_path = common_path + '/' + str(iter_ + (epsd+1) // eval_epsd_interval)
                     self.save(common_path, specific_path)
                     np.savetxt(common_path + '/mean_rewards.txt', np.array(rewards))
+            
+            if (epsd+1) % model_epsd_interval == 0:
+                if self.hierarchical:
+                    stdscr = curses.initscr()
+                    curses.noecho()
+                    curses.cbreak()
+
+                    for i in range(0, model_iter):
+                        self.agent.learn_transition_model(i, stdscr)
+
+                    curses.echo()
+                    curses.nocbreak()
+                    curses.endwin()
+
+                    if save_progress:
+                        specific_path = common_path + '/' + str(iter_ + (epsd+1) // eval_epsd_interval)
+                        self.save(common_path, specific_path)
+                        np.savetxt(common_path + '/mean_rewards.txt', np.array(rewards))
               
         if self.multitask:
             return np.array(rewards).reshape(-1), np.array(goal_rewards).reshape(-1)

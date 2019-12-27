@@ -7,7 +7,7 @@ import torch.optim as optim
 def exists_folder(f_name):
     return os.path.isdir(f_name)
 
-n_test = 134
+n_test = 140
 last_iter = 0
 tr_epsds = 4000
 
@@ -99,7 +99,7 @@ if not started:
     params = {
                 'env_names': env_names,
                 'env_steps': env_steps,
-                'init_steps': 1000*len(env_names),
+                'init_steps': 10000*len(env_names),
                 'seed': seed,
                 'beta_coefficient': 1.0,
                 'basic_epsds': 0,
@@ -118,11 +118,11 @@ if not started:
                     'p_lr': 3e-4,                                        
                     'alpha': 5.0e-2 * np.ones(len(env_names)),                    
                     'mu': 1.0e-1 * np.ones(len(env_names)),
-                    'eta_PS': 0.1 * np.ones(n_m_states),
-                    'beta_Ss': 0.1, 
-                    'beta_SR': 0.1, 
-                    'beta_nSSA': 0.1,
-                    'beta_AT': 0.1,
+                    'eta_PS': 1.0 * np.ones(n_m_states),
+                    'beta_Ss': 1.0, 
+                    'beta_SR': 1.0, 
+                    'beta_nSSA': 1.0,
+                    'beta_AT': 1.0,
                     'zeta': 0.0,                    
                     'alpha_upper_level': 1e-2 * np.ones([len(env_names), n_m_states]),
                     'beta_upper_level': 1e-2,
@@ -130,6 +130,7 @@ if not started:
                     'seed': seed,                    
                     'r_lr': 3e-4,
                     'cm_lr': 3e-5,
+                    't_lr': 1e-3,
                     'policy_batch_size': batch_size,
                     'concept_batch_size': 256,                    
                     'reward_learning': 'always',
@@ -137,7 +138,7 @@ if not started:
                     'policy_latent_dim': 0,
                     'inconsistency_metric': 'poly',
                     'body_position': False,
-                    'model_update_method': 'distribution',
+                    'model_update_method': 'discrete',
                     'upper_level_annealing' : False,
                     'upper_policy_steps': 30,
                     'evaluation_upper_level_steps': 1,
@@ -167,7 +168,8 @@ if not started:
                     'threshold_entropy_beta_AT': 0.5+np.log(1.6)-0.2,
                     'n_dims_excluded': 2,
                     'SimPLe_distribution_type_encoder': 'discrete',
-                    'transition_model': 'VQVAE'
+                    'transition_model': 'VQVAE',
+                    'concept_model_type': 'classifier'
                 }    
 
     system = System(params, agent_params=agent_params)
