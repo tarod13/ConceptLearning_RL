@@ -1,16 +1,11 @@
 import gym
 import torch
 import numpy as np
-from scipy.special import logsumexp
 
-import torch.optim as optim
-from torch.distributions import Normal, Categorical
+from torch.distributions import Categorical
 from torch.nn.utils import clip_grad_norm_
 
-from nets import (Memory, v_valueNet, q_valueNet, policyNet, conditionalEncoder, mixtureConceptModel, encoderConceptModel, 
-                    rNet, rewardNet, v_parallel_valueNet, q_parallel_valueNet, nextSNet, conceptLossNet, transitionNet, 
-                    r_parallelNet, SimPLeNet, ConditionalSimPLeNet, AutoregressivePrior, ConditionalVQVAE_Net, classifierConceptModel)
-from tabularQ import Agent as mAgent
+from nets_seq import (Memory, v_Net, q_Net, DQN, s_Net, c_Net)
 
 import os
 import time
@@ -35,8 +30,6 @@ fourcc = VideoWriter_fourcc(*'MP42')
 use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")
 
-plt.ion()
-# writer = SummaryWriter()
 ###########################################################################
 #
 #                           General methods
@@ -92,9 +85,18 @@ class Agent:
         self.params = params.copy()
         default_params = {
                             'n_concepts': 10,
-                            'alpha': 1.0,
+                            'decision_type': 'epsilon',
+                            'alpha': {
+                                        'sl': 1.0,
+                                        'ql': 1.0
+                                    },
+                            'init_epsilon': 1.0,
+                            'min_epsilon': 0.1,
+                            'delta_epsilon': 1.6e-6,
                             'init_threshold_entropy_alpha': 0.0,
                             'delta_threshold_entropy_alpha': 1.6e-5,
+                            'min_threshold_entropy_alpha_ql': np.log(2),
+                            'DQN_learning_type': 'DQL',
 
                             'lr': {
                                     'sl': {
@@ -104,20 +106,22 @@ class Agent:
                                             'alpha': 3e-4,
                                             'v_target': 5e-3
                                         },
-                                    'cl': {
+                                    'ql': {
                                             'q': 3e-4,
-                                            'v': 3e-4
+                                            'v': 3e-4,
+                                            'alpha': 3e-4,
+                                            'v_target': 5e-3
                                         }
                                     },
 
                             'dim_excluded': {
                                         'init': 2,
-                                        'last': 40
+                                        'last': 60
                                     },
                             
                             'batch_size': {
                                             'sl': 256,
-                                            'cl': 256
+                                            'ql': 256
                                         },
 
                             'memory_capacity': 400000,
@@ -146,38 +150,55 @@ class Agent:
         self.lr = self.params['lr']
         self.gamma = self.params['gamma']
         self.clip_value = self.params['clip_value']
+        self.decision_type = self.params['decision_type']
+        self.DQN_learning_type = self.params['DQN_learning_type']
 
         # Metric weights
-        self.min_threshold_entropy_alpha = -a_dim*1.0
-        self.threshold_entropy_alpha = self.params['init_threshold_entropy_alpha']
+        self.min_threshold_entropy_alpha = {
+                                            'sl': -a_dim*1.0,
+                                            'ql': self.params['min_threshold_entropy_alpha_ql']
+                                        }
+        self.threshold_entropy_alpha = {
+                                        'sl': self.params['init_threshold_entropy_alpha'],
+                                        'ql': self.params['min_threshold_entropy_alpha_ql']
+                                    }
         self.delta_threshold_entropy_alpha = self.params['delta_threshold_entropy_alpha']
         alpha = self.params['alpha']
-        self.alpha = (alpha * torch.ones(self.n_tasks['sl']).float().to(device) if is_float(alpha) else 
-                        (alpha.float().to(device) if is_tensor(alpha) else torch.from_numpy(alpha).float().to(device)))
+        self.alpha = {}
+        self.alpha['sl'] = (alpha['sl'] * torch.ones(self.n_tasks['sl']).float().to(device) if is_float(alpha['sl']) else 
+                        (alpha['sl'].float().to(device) if is_tensor(alpha['sl']) else torch.from_numpy(alpha['sl']).float().to(device)))
+        self.alpha['ql'] = (alpha['ql'] * torch.ones(self.n_tasks['ql']).float().to(device) if is_float(alpha['ql']) else 
+                        (alpha['ql'].float().to(device) if is_tensor(alpha['ql']) else torch.from_numpy(alpha['ql']).float().to(device)))
+        self.epsilon = self.params['init_epsilon']
+        self.min_epsilon = self.params['min_epsilon']
+        self.delta_epsilon = self.params['delta_epsilon']
         
         # Nets and memory
         self.critic1 = {
-                            'sl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
-                            'cl': q_valueNet(s_dim, a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device)
+                            'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
+                            'ql': DQN(s_dim-self.dim_excluded['init'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
                         }
         self.critic2 = {
-                            'sl': q_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
-                            'cl': q_valueNet(s_dim, a_dim, n_tasks['cl'], lr=self.lr['cl']['q']).to(device)
+                            'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
+                            'ql': DQN(s_dim-self.dim_excluded['init'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
                         }
         self.v = {
-                            'sl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
-                            'cl': v_valueNet(s_dim, n_tasks['cl'], lr=self.lr['cl']['v']).to(device)
+                            'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
+                            'ql': v_Net(s_dim-self.dim_excluded['init'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
                         }
         self.v_target = {
-                            'sl': v_valueNet(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
-                            'cl': v_valueNet(s_dim, n_tasks['cl'], lr=self.lr['cl']['v']).to(device)
+                            'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
+                            'ql': v_Net(s_dim-self.dim_excluded['init'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
                         }
-        self.actor = policyNet(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['sl']['pi']).to(device)
+        self.actor = s_Net(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['sl']['pi']).to(device)
 
         self.memory = {
                         'sl':  Memory(self.params['memory_capacity'], n_seed=self.seed),
-                        'cl':  Memory(self.params['memory_capacity'], n_seed=self.seed)
-                    }    
+                        'ql':  Memory(self.params['memory_capacity'], n_seed=self.seed)
+                    }
+
+        updateNet(self.v_target['sl'], self.v['sl'],1.0)
+        updateNet(self.critic2['ql'], self.critic1['ql'],1.0)    
     
     def memorize(self, event, learning_type, init=False):
         if init:
@@ -185,16 +206,154 @@ class Agent:
         else:
             self.memory[learning_type].store(event.tolist())
     
-    def act(self, state, task, learning_type, explore=True):
-        if learning_type == 'sl':
-            A = task
-        # elif learning_type == 'cl':
-        #     S = self.concept_inference(s[self.n_dims_excluded:], explore=explore)
-        #     A = self.high_level_decision(task, S, explore=explore)            
+    def decide(self, state, task, explore=True):
+        skill = self.decide_q_dist(state, task, explore=explore) if self.decision_type == 'q_dist' else self.decide_epsilon(state, task, explore=explore) 
+        return skill
+
+    def decide_q_dist(self, state, task, explore=True):
+        s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:]).to(device).view(1,-1)
+        q = self.critic1['ql'](s_cuda).squeeze(0)[task,:] if np.random.rand() > 0.5 else self.critic2['ql'](s_cuda).squeeze(0)[task,:]
+        with torch.no_grad():
+            pi = torch.exp((q-q.max())/(self.alpha['ql'][task]+1e-6)).view(-1)
+            pi = pi / pi.sum()
+            skill = Categorical(probs=pi).sample().item() if explore else pi.argmax().item()
+            return skill
+
+    def decide_epsilon(self, state, task, explore=True):
+        s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:]).to(device).view(1,-1)
+        with torch.no_grad():
+            q = self.critic1['ql'](s_cuda).squeeze(0)[task,:]
+            epsilon = self.epsilon if explore else 0.0
+            skill = q.argmax().item() if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
+            return skill            
+
+    def act(self, state, skill, explore=True):
         s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:-self.dim_excluded['last']]).to(device)
         with torch.no_grad():
-            a = self.actor.sample_action(s_cuda, A, explore=explore)
+            a = self.actor.sample_action(s_cuda, skill, explore=explore) if skill < self.n_tasks['sl'] else np.zeros(self.a_dim)            
             return a
+
+    def learn_DQN(self, only_metrics=False):
+        if not only_metrics:
+            self.learn_DQN_DQL() if self.DQN_learning_type == 'DQL' else self.learn_DQN_SAC(only_metrics=only_metrics)
+        else:
+            metrics = {} if self.DQN_learning_type == 'DQL' else self.learn_DQN_SAC(only_metrics=only_metrics)
+            return metrics
+
+    def learn_DQN_DQL(self):
+        batch = self.memory['ql'].sample(self.batch_size['ql'])
+        batch = np.array(batch)
+        batch_size = batch.shape[0]
+
+        if batch_size > 0:
+            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['init']:self.s_dim]).to(device)
+            A_batch = batch[:,self.s_dim].astype('int')
+            r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1,1).to(device)
+            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['init']:2*self.s_dim+2]).to(device)
+            d_batch = torch.FloatTensor(batch[:,2*self.s_dim+2]).view(-1,1).to(device)
+            T_batch = batch[:,2*self.s_dim+3].astype('int')  
+
+            # Optimize q networks
+            q = self.critic1['ql'](s_batch)[np.arange(batch_size), T_batch, A_batch]
+            qn = self.critic2['ql'](ns_batch)[np.arange(batch_size), T_batch, :]
+            # q2 = self.critic2['ql'](s_batch)
+            # q = torch.min(torch.stack([q1, q2]), 0)[0].detach()
+                           
+            q_approx = r_batch + self.gamma * qn.max(1, keepdim=True)[0] * (1.0-d_batch)
+            
+            q_loss = (((q - q_approx.detach()).clamp(-1.0,1.0))**2).mean()
+            self.critic1['ql'].optimizer.zero_grad()
+            q_loss.backward()
+            clip_grad_norm_(self.critic1['ql'].parameters(), self.clip_value)
+            self.critic1['ql'].optimizer.step()
+
+            updateNet(self.critic2['ql'], self.critic1['ql'], self.lr['ql']['v_target'])
+
+            # q2_loss = self.critic2['ql'].loss_func(q2_AT, q_approx.detach())
+            # self.critic2['ql'].optimizer.zero_grad()
+            # q2_loss.backward()
+            # clip_grad_norm_(self.critic2['ql'].parameters(), self.clip_value)
+            # self.critic2['ql'].optimizer.step()
+
+            # Anneal epsilon
+            self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])
+    
+    def learn_DQN_SAC(self, only_metrics=False):
+        batch = self.memory['ql'].sample(self.batch_size['ql'])
+        batch = np.array(batch)
+        batch_size = batch.shape[0]
+
+        if batch_size > 0:
+            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['init']:self.s_dim]).to(device)
+            A_batch = batch[:,self.s_dim].astype('int')
+            r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1,1).to(device)
+            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['init']:2*self.s_dim+2]).to(device)
+            d_batch = torch.FloatTensor(batch[:,2*self.s_dim+2]).view(-1,1).to(device)
+            T_batch = batch[:,2*self.s_dim+3].astype('int')  
+
+            # Optimize q networks
+            q1 = self.critic1['ql'](s_batch)
+            q2 = self.critic2['ql'](s_batch)
+            q = torch.min(torch.stack([q1, q2]), 0)[0].detach()
+            if not only_metrics:               
+                q1_AT = q1[np.arange(batch_size), T_batch, A_batch]
+                q2_AT = q2[np.arange(batch_size), T_batch, A_batch]
+
+                next_v = self.v_target['ql'](ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                q_approx = r_batch + self.gamma * next_v * (1-d_batch)
+                
+                q1_loss = self.critic1['ql'].loss_func(q1_AT, q_approx.detach())
+                self.critic1['ql'].optimizer.zero_grad()
+                q1_loss.backward()
+                clip_grad_norm_(self.critic1['ql'].parameters(), self.clip_value)
+                self.critic1['ql'].optimizer.step()
+                
+                q2_loss = self.critic2['ql'].loss_func(q2_AT, q_approx.detach())
+                self.critic2['ql'].optimizer.zero_grad()
+                q2_loss.backward()
+                clip_grad_norm_(self.critic2['ql'].parameters(), self.clip_value)
+                self.critic2['ql'].optimizer.step()                
+
+            # Optimize v network
+            pi = torch.exp((q - q.max(2, keepdim=True)[0])/ (self.alpha['ql'].view(1,-1,1)+1e-6))
+            pi = pi / pi.sum(2, keepdim=True)
+            q_mean = (pi * q).sum(2).detach()
+            HA_given_sT = -(pi * torch.log(pi + 1e-10)).sum(2).detach()
+            v_approx = (q_mean + self.alpha['ql'].view(1,-1) * HA_given_sT)[np.arange(batch_size), T_batch].view(-1,1) 
+
+            if not only_metrics:
+                v = self.v['ql'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
+            
+            task_mask = torch.zeros(batch_size, self.n_tasks['ql']).float().to(device)
+            task_mask[np.arange(batch_size), T_batch] = torch.ones(batch_size).float().to(device)
+            task_count = task_mask.sum(0).view(-1,1)
+            task_mask_distribution = task_mask / (task_count.view(1,-1) + 1e-10)
+            
+            HA_s_given_T = (HA_given_sT * task_mask_distribution).sum(0)
+            HA_sT = HA_s_given_T.mean()
+            alpha_gradient = HA_s_given_T.detach() - self.threshold_entropy_alpha['ql']
+
+            if not only_metrics:
+                v_loss = ((v - v_approx.detach())**2).mean()
+                self.v['ql'].optimizer.zero_grad()
+                v_loss.backward()
+                clip_grad_norm_(self.v['ql'].parameters(), self.clip_value)
+                self.v['ql'].optimizer.step()
+                updateNet(self.v_target['ql'], self.v['ql'], self.lr['ql']['v_target'])
+
+                # Optimize dual variable                
+                log_alpha = torch.log(self.alpha['ql'] + 1e-6)
+                log_alpha -= self.lr['ql']['alpha'] * alpha_gradient
+                self.alpha['ql'] = torch.exp(log_alpha).clamp(1e-10, 1e+3)
+                    
+        else:
+            HA_sT = torch.zeros(1).to(device)
+            
+        if only_metrics:
+            metrics = {
+                        'H(A|s,T)': HA_sT.mean().detach().cpu().numpy()                
+                    }            
+            return metrics
     
     def learn_skills(self, only_metrics=False):
         batch = self.memory['sl'].sample(self.batch_size['sl'])
@@ -237,7 +396,7 @@ class Agent:
             q2_off = self.critic2['sl'](s_batch.detach(), a_batch)
             q_off = torch.min(torch.stack([q1_off, q2_off]), 0)[0]
             
-            v_approx = (q_off - self.alpha.view(1,-1) * log_pa_sT)[np.arange(batch_size), T_batch].view(-1,1) 
+            v_approx = (q_off - self.alpha['sl'].view(1,-1) * log_pa_sT)[np.arange(batch_size), T_batch].view(-1,1) 
 
             if not only_metrics:
                 v = self.v['sl'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
@@ -247,7 +406,7 @@ class Agent:
             task_count = task_mask.sum(0).view(-1,1)
             task_mask_distribution = task_mask / (task_count.view(1,-1) + 1e-10)
             Ha_sT = -(log_pa_sT * task_mask_distribution).sum(0)
-            alpha_gradient = Ha_sT.detach() - self.threshold_entropy_alpha
+            alpha_gradient = Ha_sT.detach() - self.threshold_entropy_alpha['sl']
 
             if not only_metrics:
                 v_loss = ((v - v_approx.detach())**2).mean()
@@ -265,11 +424,11 @@ class Agent:
                 self.actor.optimizer.step()
 
                 # Optimize dual variable                
-                log_alpha = torch.log(self.alpha + 1e-6)
+                log_alpha = torch.log(self.alpha['sl'] + 1e-6)
                 log_alpha -= self.lr['sl']['alpha'] * alpha_gradient
-                self.alpha = torch.exp(log_alpha).clamp(1e-10, 1e+3)
+                self.alpha['sl'] = torch.exp(log_alpha).clamp(1e-10, 1e+3)
 
-                self.threshold_entropy_alpha = np.max([self.threshold_entropy_alpha - self.delta_threshold_entropy_alpha, self.min_threshold_entropy_alpha])
+                self.threshold_entropy_alpha['sl'] = np.max([self.threshold_entropy_alpha['sl'] - self.delta_threshold_entropy_alpha, self.min_threshold_entropy_alpha['sl']])
                     
         else:
             log_pa_sT = torch.zeros(1).to(device)  
@@ -283,13 +442,16 @@ class Agent:
     
     def estimate_metrics(self, learning_type):
         with torch.no_grad():
-            skill_metrics = self.learn_skills(only_metrics=True)
-            metrics = skill_metrics if learning_type == 'sl' else {}
+            if learning_type == 'sl':
+                metrics = self.learn_skills(only_metrics=True)
+            elif learning_type == 'ql':
+                metrics = self.learn_DQN(only_metrics=True)
         return metrics
     
     def save(self, common_path, specific_path, learning_type):
         self.params['alpha'] = self.alpha
         self.params['threshold_entropy_alpha'] = self.threshold_entropy_alpha
+        self.params['init_epsilon'] = self.epsilon
         
         pickle.dump(self.params,open(common_path+'/agent_params.p','wb'))
 
@@ -306,8 +468,7 @@ class Agent:
         torch.save(self.v[learning_type].state_dict(), specific_path+'_v_'+learning_type+'.pt')
         torch.save(self.v_target[learning_type].state_dict(), specific_path+'_v_target_'+learning_type+'.pt')
         if learning_type == 'sl':
-            torch.save(self.actor.state_dict(), specific_path+'_actor.pt')        
-                
+            torch.save(self.actor.state_dict(), specific_path+'_actor.pt')
     
     def load(self, common_path, specific_path, learning_type, load_memory=True):
         if load_memory: 
@@ -338,25 +499,26 @@ class Agent:
 #
 #----------------------------------------------
 class System:
-    def __init__(self, params, agent_params={}):
+    def __init__(self, params, agent_params={}, skill_learning=True):
         
         self.params = params
         default_params = {
                             'seed': 1000,
                             'env_names_sl': ['Hopper-v2'],
-                            'env_names_cl': ['Hopper-v2'],
+                            'env_names_ql': ['Hopper-v2'],
                             'env_names_tl': ['Hopper-v2'],
-                            'env_steps': 1, 
+                            'env_steps_sl': 1,
+                            'env_steps_ql': 5, 
                             'grad_steps': 1, 
                             'init_steps': 10000,
                             'max_episode_steps': 1000,
                             'tr_steps_sl': 1000,
-                            'tr_steps_cl': 1000,
+                            'tr_steps_ql': 200,
                             'tr_epsd_sl': 1000,
-                            'tr_epsd_cl': 1000,
+                            'tr_epsd_ql': 10000,
                             'eval_epsd_sl': 2,
                             'eval_epsd_interval': 10,
-                            'eval_epsd_cl': 2,
+                            'eval_epsd_ql': 2,
                             'batch_size': 256, 
                             'render': True, 
                             'reset_when_done': True, 
@@ -372,32 +534,35 @@ class System:
         set_seed(self.seed)
         self.env_names = {
                             'sl': self.params['env_names_sl'],
-                            'cl': self.params['env_names_cl'],
+                            'ql': self.params['env_names_ql'],
                             'tl': self.params['env_names_tl']
                         }
         self.n_tasks = {
                             'sl': len(self.env_names['sl']),
-                            'cl': len(self.env_names['cl']),
+                            'ql': len(self.env_names['ql']),
                             'tl': len(self.env_names['tl'])
                         }
         self.steps = {
-                        'env': self.params['env_steps'],
+                        'env': {
+                                'sl': self.params['env_steps_sl'],
+                                'ql': self.params['env_steps_ql']
+                            },
                         'grad': self.params['grad_steps'],
 
                         'init': self.params['init_steps'],
                         'tr': {
                                 'sl': self.params['tr_steps_sl'],
-                                'cl': self.params['tr_steps_cl']
+                                'ql': self.params['tr_steps_ql']
                             }
                     }
         self.epsds = {
             'tr': {
                 'sl': self.params['tr_epsd_sl'],
-                'cl': self.params['tr_epsd_cl']
+                'ql': self.params['tr_epsd_ql']
             },
             'eval': {
                 'sl': self.params['eval_epsd_sl'],
-                'cl': self.params['eval_epsd_cl'],
+                'ql': self.params['eval_epsd_ql'],
                 'interval': self.params['eval_epsd_interval']
             },
         }
@@ -407,9 +572,9 @@ class System:
         self.store_video = self.params['store_video']
         self.reset_when_done = self.params['reset_when_done']
         self._max_episode_steps = self.params['max_episode_steps']
-
+        
         self.envs = {}
-        self.learning_type = 'sl'
+        self.learning_type = 'sl' # if skill_learning else 'ql'
 
         self.set_envs()
 
@@ -473,18 +638,27 @@ class System:
         self.agent.memorize(event, self.learning_type)   
         return done
 
-    def interaction_skills(self, remember=True, explore=True, learn=True):  
+    def interaction(self, remember=True, explore=True, learn=True):  
         event = np.empty(self.t_dim)
-        state = self.get_obs()
+        initial_state = self.get_obs()
+        state = initial_state.copy()
+        final_state = initial_state.copy()
         total_reward = 0.0
+        done = False
 
-        for env_step in range(0, self.steps['env']):
-            action = self.agent.act(state, self.task, self.learning_type, explore=explore)
+        if self.learning_type == 'sl':
+            skill = self.task
+        elif self.learning_type == 'ql':
+            skill = self.agent.decide(state, self.task, explore=explore)
+
+        for env_step in range(0, self.steps['env'][self.learning_type]):
+            action = self.agent.act(state, skill, explore=explore if self.learning_type == 'sl' else False)
             scaled_action = scale_action(action, self.min_action, self.max_action).reshape(-1)
-            next_state, reward, done, _ = self.envs[self.learning_type][self.task].step(scaled_action)
-            done = done and self.reset_when_done
+            next_state, reward, done_step, _ = self.envs[self.learning_type][self.task].step(scaled_action)
+            done = done_step and self.reset_when_done
             total_reward += reward
-            
+            final_state = np.copy(next_state)
+
             event[:self.s_dim] = state
             event[self.s_dim:self.sa_dim] = action
             event[self.sa_dim] = reward
@@ -492,17 +666,32 @@ class System:
             event[self.sars_dim] = float(done)
             event[self.sarsd_dim] = self.task
         
-            if remember: self.agent.memorize(event.copy(), self.learning_type)
+            if remember and self.learning_type == 'sl': self.agent.memorize(event.copy(), self.learning_type)
             if done: break
-            if env_step < self.steps['env']-1: state = np.copy(next_state)
+            if env_step < self.steps['env'][self.learning_type]-1: state = np.copy(next_state)
         
+        if remember and self.learning_type == 'ql':
+            event = np.empty(2*self.s_dim+4)
+            event[:self.s_dim] = initial_state 
+            event[self.s_dim] = skill
+            event[self.s_dim+1] = total_reward
+            event[self.s_dim+2:2*self.s_dim+2] = final_state
+            event[2*self.s_dim+2] = float(done)
+            event[2*self.s_dim+3] = self.task
+
+            self.agent.memorize(event.copy(), self.learning_type)
+
         if learn:
-            for _ in range(0, self.steps['grad']):
-                self.agent.learn_skills()
+            if self.learning_type == 'sl':
+                for _ in range(0, self.steps['grad']):
+                    self.agent.learn_skills()
+            elif self.learning_type == 'ql':
+                for _ in range(0, self.steps['grad']):
+                    self.agent.learn_DQN()
 
         return total_reward, done, event
 
-    def train_agent(self, initialization=True, storing_path='', rewards=[], metrics=[]):
+    def train_agent(self, initialization=True, skill_learning=True, storing_path='', rewards=[], metrics=[], iter_0=0):
         if len(storing_path) == 0: storing_path = self.params['storing_path']
 
         if initialization:
@@ -510,9 +699,16 @@ class System:
             specific_path = storing_path + '/' + str(0)
             self.save(storing_path, specific_path)
         
-        self.train_agent_skills(storing_path=storing_path, rewards=rewards, metrics=metrics)
+        if skill_learning:
+            self.train_agent_nets(storing_path=storing_path, rewards=rewards, metrics=metrics, iter_0=iter_0)
+
+        iter_0_ql = iter_0 if not self.learning_type == 'sl' else 0
+        self.learning_type = 'ql'
+        self.set_envs()
+        self.agent.memory['sl'].forget()
+        self.train_agent_nets(storing_path=storing_path, iter_0=iter_0_ql)
     
-    def train_agent_skills(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
+    def train_agent_nets(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
         if self.render: self.envs[self.learning_type][self.task].render()         
 
         for epsd in range(0, self.epsds['tr'][self.learning_type]):
@@ -522,9 +718,9 @@ class System:
             
             for epsd_step in range(0, self.steps['tr'][self.learning_type]):
                 if self.agent.memory[self.learning_type].len_data < self.batch_size:
-                    done = self.interaction_skills(learn=False)[1]
+                    done = self.interaction(learn=False)[1]
                 else:
-                    done = self.interaction_skills(learn=True)[1]
+                    done = self.interaction(learn=True)[1]
 
                 if self.render: self.envs[self.learning_type][self.task].render()
 
@@ -534,14 +730,18 @@ class System:
                 r, _, m = self.eval_agent_skills(explore=False, iter_=iter_)[:3]
                 metrics.append(m)
                 rewards.append(r)
-                np.savetxt(storing_path + '/metrics.txt', np.array(metrics))               
+                np.savetxt(storing_path + '/metrics_'+self.learning_type+'.txt', np.array(metrics))               
                 
             specific_path = storing_path + '/' + str(iter_)
             self.save(storing_path, specific_path)
-            np.savetxt(storing_path + '/mean_rewards.txt', np.array(rewards))
-
+            np.savetxt(storing_path + '/mean_rewards_'+self.learning_type+'.txt', np.array(rewards))
+    
     def train_agent_concepts(self):
         pass
+
+    @property
+    def entropy_metric(self):
+        return self.learning_type == 'sl' or self.agent.DQN_learning_type == 'SAC'
 
     def eval_agent_skills(self, eval_epsds=0, explore=False, iter_=0, start_render=False, print_space=True, specific_path='video', max_epsd=0):   
         task = self.task
@@ -556,21 +756,23 @@ class System:
         epsd_lenghts = []
         min_epsd_reward = 1.0e6
         max_epsd_reward = -1.0e6
-                
-        Ha_sT = []
-        Ha_sT_average = 0.0
+
+        if self.entropy_metric:
+            Ha_sT = []
+            Ha_sT_average = 0.0
+            entropy = 'H(a|s,T)' if self.learning_type == 'sl' else 'H(A|s,T)'
         
         for epsd in range(0, eval_epsds):
 
-            if self.store_video: video = VideoWriter(specific_path + '_' + str(self.task) + '_[0' + str(epsd) + '.avi', fourcc, float(FPS), (width, height))
+            if self.store_video: video = VideoWriter(specific_path + '_' + str(self.task) + '_' + str(epsd) + '_' + self.learning_type + '.avi', fourcc, float(FPS), (width, height))
 
             change_env = False if epsd == 0 else True
             self.reset(change_env=change_env)            
-            if max_epsd <= 0: max_epsd = self.envs[self.learning_type][self.task]._max_episode_steps
+            if max_epsd <= 0: max_epsd = (self.envs[self.learning_type][self.task]._max_episode_steps // self.steps['env'][self.learning_type])
             epsd_reward = 0.0
 
             for eval_step in itertools.count(0):            
-                reward, done, event = self.interaction_skills(explore=explore, learn=False)
+                reward, done, event = self.interaction(explore=explore, learn=False)
                 event[self.sa_dim] = reward  
                 epsd_reward += reward              
 
@@ -586,28 +788,34 @@ class System:
                     epsd_lenghts.append(eval_step + 1)
                     break
 
-            metrics = self.agent.estimate_metrics(self.learning_type)                
-            Ha_sT.append(metrics['H(a|s,T)'])
+            metrics = self.agent.estimate_metrics(self.learning_type)
+            if self.entropy_metric:                            
+                Ha_sT.append(metrics[entropy])
+                Ha_sT_average += (Ha_sT[-1] - Ha_sT_average)/(epsd+1)
 
             rewards.append(epsd_reward)
             min_epsd_reward = np.min([epsd_reward, min_epsd_reward])
             max_epsd_reward = np.max([epsd_reward, max_epsd_reward])
             average_reward = np.array(rewards).mean()
             
-            Ha_sT_average += (Ha_sT[-1] - Ha_sT_average)/(epsd+1)
-            
-            stdout.write("Iter %i, epsd %i, H(a|s,T): %.4f, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
-                (iter_, (epsd+1), Ha_sT_average, min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
+            if self.entropy_metric: 
+                stdout.write("Iter %i, epsd %i, %s: %.4f, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
+                    (iter_, (epsd+1), entropy, Ha_sT_average, min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
+            else:
+                stdout.write("Iter %i, epsd %i, epsilon: %f, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
+                    (iter_, (epsd+1), self.agent.epsilon, min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
             stdout.flush()         
 
         if print_space: print("")
 
         if self.store_video: video.release()
-        metric_vector = np.array([Ha_sT_average])
+        metric_vector = np.array([Ha_sT_average]) if self.entropy_metric else np.array([]) 
+        
         self.task = task
         return rewards, np.array(events), metric_vector, np.array(epsd_lenghts)      
     
     def save(self, common_path, specific_path):
+        self.params['learning_type'] = self.learning_type
         pickle.dump(self.params, open(common_path+'/params.p','wb'))
         self.agent.save(common_path, specific_path, self.learning_type)
     
