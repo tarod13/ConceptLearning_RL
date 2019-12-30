@@ -1,5 +1,6 @@
 import math
 import random
+import copy
 import numpy as np
 
 import torch
@@ -28,6 +29,11 @@ def weights_init_(m):
         torch.nn.init.xavier_uniform_(m.weight, gain=1)
         torch.nn.init.constant_(m.bias, 0)
 
+def weights_init_big(m):
+    if isinstance(m, nn.Linear) or isinstance(m, parallel_Linear) or isinstance(m, parallel_Linear_simple):
+        torch.nn.init.normal_(m.weight)
+        torch.nn.init.normal_(m.bias)
+
 ###########################################################################
 #
 #                               Classes
@@ -39,19 +45,26 @@ class Memory:
         self.capacity = capacity
         self.data = []        
         self.pointer = 0
+        self.weights = []
         set_seed(n_seed)
     
     def store(self, event):
         if len(self.data) < self.capacity:
             self.data.append(None)
+            self.weights.append(None)
         self.data[self.pointer] = event
+        self.weights[self.pointer] = 1.0
         self.pointer = (self.pointer + 1) % self.capacity
     
     def sample(self, batch_size):
-        if batch_size < len(self.data):
-            return random.sample(self.data, int(batch_size)) 
-        else:
-            return random.sample(self.data, len(self.data))
+        k = int(batch_size) if batch_size < len(self.data) else len(self.data)
+        population = list(np.arange(self.len_data))
+        sample = random.choices(population, weights=self.weights, k=k)
+        return [self.data[i] for i in sample], sample
+
+    def update_weights(self, sample, weights):
+        for s, w in zip(sample, weights):
+            self.weights[s] = w      
 
     def retrieve(self):
         return np.copy(self.data)
@@ -67,6 +80,122 @@ class Memory:
     @property
     def len_data(self):
         return len(self.data)
+
+class IndexedNode:
+    def __init__(self, value, index, root=False, left=None, right=None, code=[]):
+        self.root = root        
+        self.left = left
+        self.right = right
+        self.code = code
+
+        if not (left is None or right is None):
+            self.value = left.value + right.value
+            self.max = right.value # TODO: reorder in case this is not true
+            self.min = left.value
+            self.left.code = code+[0]
+            self.right.code = code+[1]
+        elif right is None:
+            self.value = left.value
+            self.max = left.value
+            self.min = left.value
+            self.left.code = code+[0]
+        else:
+            self.value = value
+            self.max = value
+            self.min = value
+
+        if root:
+            self.index = -1            
+        else:
+            self.index = index
+
+    @property
+    def leaf(self):
+        return not self.root and self.free
+    
+    @property 
+    def internal_node(self):
+        return not (self.leaf or self.root)
+    
+    @property
+    def full(self):
+        return not (self.left is None or self.right is None)
+    
+    @property
+    def free(self):
+        return self.left is None and self.right is None
+
+class SumTree:
+    def __init__(self, alpha=0.0):
+        self.root = IndexedNode(0.0, -1, root=True)
+    
+    def add_node(self, value, index):
+        node = IndexedNode(value, index)
+        self.find_parent(node, self.root)
+    
+    def find_parent(self, node, parent):
+        parent.value += node.value
+        parent.max = max(node.value, parent.max)
+        parent.min = min(node.value, parent.min)
+
+        if parent.free:
+            node.code = parent.code + [0]
+            parent.left = node
+        elif not parent.full:                
+            if parent.left.value <= node.value:
+                node.code = parent.code + [1]
+                parent.right = node
+            else:
+                parent.left.code = parent.code + [1]
+                parent.right = copy.deepcopy(parent.left)
+                node.code = parent.code + [0]
+                parent.left = node                    
+        elif parent.left.leaf and parent.right.leaf:
+            if parent.left.value <= node.value:
+                if parent.right.value <= node.value:
+                    left = copy.deepcopy(parent.left)
+                    middle = copy.deepcopy(parent.right)
+                    parent.right = node
+                else:
+                    left = copy.deepcopy(parent.left)
+                    middle = node                        
+            else:
+                left = node
+                middle = copy.deepcopy(parent.left)                    
+            parent.left = IndexedNode(0, -1, left=left, right=middle, code=parent.code+[0])
+        elif not (parent.left.leaf or parent.right.leaf):
+            if node.value < parent.left.max:
+                self.find_parent(node, parent.left)
+            elif node.value >= parent.right.min:
+                self.find_parent(node, parent.right)
+            else:
+                self.find_parent(node, parent.left) if np.random.rand() > 0.5 else self.find_parent(node, parent.right)
+        elif not parent.left.leaf and parent.right.leaf:
+            if node.value < parent.left.max:
+                self.find_parent(node, parent.left)
+            elif node.value >= parent.right.value:
+                left = copy.deepcopy(parent.right)
+                parent.right = IndexedNode(0, -1, left=left, right=node, code=parent.code+[1])
+            else:
+                right = copy.deepcopy(parent.right)
+                parent.right = IndexedNode(0, -1, left=node, right=right, code=parent.code+[1])
+        elif parent.left.leaf and not parent.right.leaf:
+            if node.value >= parent.right.min:
+                self.find_parent(node, parent.right)
+            elif node.value < parent.left.value:
+                right = copy.deepcopy(parent.left)
+                parent.left = IndexedNode(0, -1, left=node, right=right, code=parent.code+[0])
+            else:
+                left = copy.deepcopy(parent.left)
+                parent.left = IndexedNode(0, -1, left=left, right=node, code=parent.code+[0])
+        else:
+            assert 0==1, 'Error. Method: find_parent. Description: Case not considered.'
+              
+    def sample(self, batch_size):
+        partition = np.linspace(0.0, self.root.value, num=batch_size)
+        indices, codes = [], []
+        return indices, codes
+
 
 #-------------------------------------------------------------
 #
@@ -133,96 +262,154 @@ class DQN(nn.Module):
         self.n_tasks = n_tasks   
         self.vision_dim = vision_dim
         self.vision_channels = vision_channels
-        self.kinematic_dim = s_dim - vision_dim*vision_channels     
-        
-        nc1 = vision_channels * 2
-        nc2 = vision_channels * 4
-        nc3 = vision_channels * 8
-        nc4 = vision_channels * 16
+        self.kinematic_dim = s_dim - vision_dim*vision_channels 
 
-        kernel_size1 = 4
-        kernel_size2 = 4
-        kernel_size3 = 3
-        kernel_size4 = 3
+        self.l1 = parallel_Linear_simple(n_tasks, s_dim, 256)
+        self.l2 = parallel_Linear(n_tasks, 256, 256)
+        self.lV_E = parallel_Linear(n_tasks, 256, 1)
+        self.lV_I = parallel_Linear(n_tasks, 256, 1)
+        self.lA_E = parallel_Linear(n_tasks, 256, n_skills) 
+        self.lA_I = parallel_Linear(n_tasks, 256, n_skills)  
 
-        dilation1 = 1
-        dilation2 = 2
-        dilation3 = 1
-        dilation4 = 2
-        
-        k_dim1 = 24
-        k_dim2 = 20
-        k_dim3 = 15
-        k_dim4 = 10
-
-        v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
-        v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
-        v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
-        v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
-        
-        self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
-        self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
-        self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
-        self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
-        self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
-        self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
-
-        self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
-        self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
-        self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
-        self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
-
-        self.lc1x1 = nn.Conv1d(nc4, n_tasks, 1, stride=1)
-        self.lkv1 = parallel_Linear(n_tasks, v_dim4+k_dim4, 256)
-        self.lkv2 = parallel_Linear(n_tasks, 256, n_skills)
-        
-        self.bn1 = nn.BatchNorm1d(nc1)
-        self.bn2 = nn.BatchNorm1d(nc2)
-        self.bn3 = nn.BatchNorm1d(nc3)
-        self.bn4 = nn.BatchNorm1d(nc4)
-        self.bn5 = nn.BatchNorm1d(n_tasks)
-                        
         self.apply(weights_init_)
-
-        self.loss_func = nn.MSELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)       
-
-    def forward(self, s):
-        vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
-        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
-
-        v = torch.tanh(self.bn1(self.lv1e(vision_input))) * torch.sigmoid(self.bn1(self.lv1g(vision_input)))
-        v = torch.tanh(self.bn2(self.lv2e(v))) * torch.sigmoid(self.bn2(self.lv2g(v)))
-        v = torch.tanh(self.bn3(self.lv3e(v))) * torch.sigmoid(self.bn3(self.lv3g(v)))
-        v = torch.tanh(self.bn4(self.lv4e(v))) * torch.sigmoid(self.bn4(self.lv4g(v)))
-        
-        k = F.relu(self.bn1(self.lk1(kinematic_input)))
-        k = F.relu(self.bn2(self.lk2(k)))
-        k = F.relu(self.bn3(self.lk3(k)))
-        k = torch.tanh(self.bn4(self.lk4(k)))
-
-        x = torch.cat([k,v],2)
-        x = F.relu(self.bn5(self.lc1x1(x)))
-        x = F.relu(self.bn5(self.lkv1(x)))
-        x = self.lkv2(x)
-
-        return x    
-
-    #     self.l1 = nn.Linear(s_dim, 256)
-    #     self.l2 = nn.Linear(256, 256)
-    #     self.l3 = nn.Linear(256, n_tasks*n_skills)  
-
-    #     self.apply(weights_init_) 
-    #     self.loss_func = nn.MSELoss()
-    #     self.optimizer = optim.Adam(self.parameters(), lr=lr)    
+        self.loss_func = nn.SmoothL1Loss() 
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)    
     
+    def forward(self, s):
+        x = F.relu(self.l1(s))
+        x = F.relu(self.l2(x))
+        V_E = self.lV_E(x)
+        V_I = self.lV_I(x)
+        A_E = self.lA_E(x)
+        A_I = self.lA_I(x)
+        Q_E = V_E + A_E - A_E.mean(2, keepdim=True) #.view(-1, self.n_tasks, self.n_skills)
+        Q_I = V_I + A_I - A_I.mean(2, keepdim=True)
+        return Q_E, Q_I   
+        
+    #     nc1 = vision_channels * 2
+    #     nc2 = vision_channels * 4
+    #     nc3 = vision_channels * 8
+    #     nc4 = vision_channels * 16
+
+    #     kernel_size1 = 4
+    #     kernel_size2 = 4
+    #     kernel_size3 = 3
+    #     kernel_size4 = 3
+
+    #     dilation1 = 1
+    #     dilation2 = 2
+    #     dilation3 = 1
+    #     dilation4 = 2
+        
+    #     k_dim1 = 24
+    #     k_dim2 = 20
+    #     k_dim3 = 15
+    #     k_dim4 = 10
+
+    #     v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
+    #     v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
+    #     v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
+    #     v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
+        
+    #     self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+    #     self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+    #     self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+    #     self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
+    #     self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+    #     self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+    #     self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+    #     self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
+
+    #     self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
+    #     self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
+    #     self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
+    #     self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
+
+    #     self.lc1x1 = nn.Conv1d(nc4, n_tasks, 1, stride=1)
+    #     self.lkv1 = parallel_Linear(n_tasks, v_dim4+k_dim4, 256)
+    #     self.lkv2 = parallel_Linear(n_tasks, 256, n_skills)
+        
+    #     self.bn1 = nn.BatchNorm1d(nc1)
+    #     self.bn2 = nn.BatchNorm1d(nc2)
+    #     self.bn3 = nn.BatchNorm1d(nc3)
+    #     self.bn4 = nn.BatchNorm1d(nc4)
+    #     self.bn5 = nn.BatchNorm1d(n_tasks)
+                        
+    #     self.apply(weights_init_)
+
+    #     self.loss_func = nn.MSELoss()
+    #     self.optimizer = optim.Adam(self.parameters(), lr=lr)       
+
     # def forward(self, s):
-    #     x = F.relu(self.l1(s))
-    #     x = F.relu(self.l2(x))
-    #     x = self.l3(x).view(-1, self.n_tasks, self.n_skills)
-    #     return(x)
+    #     vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
+    #     kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
+
+    #     v = torch.tanh(self.bn1(self.lv1e(vision_input))) * torch.sigmoid(self.bn1(self.lv1g(vision_input)))
+    #     v = torch.tanh(self.bn2(self.lv2e(v))) * torch.sigmoid(self.bn2(self.lv2g(v)))
+    #     v = torch.tanh(self.bn3(self.lv3e(v))) * torch.sigmoid(self.bn3(self.lv3g(v)))
+    #     v = torch.tanh(self.bn4(self.lv4e(v))) * torch.sigmoid(self.bn4(self.lv4g(v)))
+        
+    #     k = F.relu(self.bn1(self.lk1(kinematic_input)))
+    #     k = F.relu(self.bn2(self.lk2(k)))
+    #     k = F.relu(self.bn3(self.lk3(k)))
+    #     k = torch.tanh(self.bn4(self.lk4(k)))
+
+    #     x = torch.cat([k,v],2)
+    #     x = F.relu(self.bn5(self.lc1x1(x)))
+    #     x = F.relu(self.bn5(self.lkv1(x)))
+    #     x = self.lkv2(x)
+
+    #     return x    
+
+class RND_subNet(nn.Module):
+    def __init__(self, s_dim, out_dim):
+        super().__init__()  
+        self.s_dim = s_dim
+        
+        self.l1 = nn.Linear(s_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, out_dim)
+
+        self.apply(weights_init_big)        
+    
+    def forward(self, s):
+        x = F.relu(self.l1(s))
+        x = F.relu(self.l2(x))
+        x = self.l3(x)
+        return(x)
+
+class RND_Net(nn.Module):
+    def __init__(self, s_dim, out_dim=20, lr=3e-4, alpha=1e-2):
+        super().__init__() 
+        self.s_dim = s_dim
+        self.out_dim = out_dim
+        self.alpha = alpha
+        
+        self.target = RND_subNet(s_dim, out_dim)
+        self.predictor = RND_subNet(s_dim, out_dim) 
+
+        self.optimizer = optim.Adam(self.predictor.parameters(), lr=lr)
+
+        self.mean_s = torch.zeros(1,s_dim).to(device)
+        self.std_s = 1e-4*torch.ones(1,s_dim).to(device)
+        self.std_e = 1.0        
+    
+    def forward(self, s):
+        self.mean_s = (1.0-self.alpha) * self.mean_s + self.alpha * s.detach().mean(0, keepdim=True)
+        self.std_s = (1.0-self.alpha) * self.std_s + self.alpha * (((s.detach() - self.mean_s)**2).mean(0, keepdim=True))**0.5
+
+        s_normalized = (s - self.mean_s) / self.std_s
+        s_normalized = s_normalized.clamp(-5.0,5.0)
+
+        noise = self.target(s_normalized)
+        prediction = self.predictor(s_normalized)
+        error = ((prediction - noise)**2).sum(1, keepdim=True)
+
+        self.std_e = (1.0-self.alpha) * self.std_e + self.alpha * ((error.detach()**2).mean())**0.5
+
+        error_normalized = error / self.std_e
+        
+        return(error_normalized) 
 
 #-------------------------------------------------------------
 #

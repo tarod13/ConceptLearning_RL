@@ -24,13 +24,17 @@ if last_iter > 0:
     specific_path = path + '/' + str(last_iter)
 
     params = pickle.load(open(path+'/params.p','rb'))
+    params['env_names_ql'] = [
+                                'AntStraightLineRestricted-v3'
+                            ]
     # params['env_names_ql'] = [
     #                             'AntStraightLineRestricted-v3',
     #                             'AntSquareTrack-v3',
     #                             'AntGatherRewards-v3', 
     #                             'AntGatherBombs-v3'
     #                         ]
-    # params['tr_epsd_ql'] = 10000
+    params['tr_steps_ql'] = 300
+    params['env_steps_ql'] = 10
     agent_params = pickle.load(open(path+'/agent_params.p','rb'))
     agent_params['decision_type'] = 'epsilon'
     agent_params['init_epsilon'] = 1.0
@@ -38,6 +42,7 @@ if last_iter > 0:
     agent_params['delta_epsilon'] = 1.6e-6
     agent_params['DQN_learning_type'] = 'DQL'
     agent_params['dim_excluded']['last'] = 60
+    agent_params['min_epsilon'] = 0.05
     #alpha_sl = agent_params['alpha']
     #agent_params['alpha'] = {}
     #agent_params['alpha']['sl'] = alpha_sl
