@@ -20,6 +20,7 @@ import gym.envs.mujoco.utils
 #Custom
 from gym.envs.mujoco.ant_random_direction import AntRandDirEnv
 from gym.envs.mujoco.ant_straight_line import AntStraightLineEnv
+from gym.envs.mujoco.ant_straight_line_restricted import AntStraightLineRestrictedEnv
 from gym.envs.mujoco.ant_straight_line_reversed import AntStraightLineRevEnv
 from gym.envs.mujoco.ant_rotate import AntRotateEnv
 from gym.envs.mujoco.ant_rotate_reward import AntRotateRewardEnv

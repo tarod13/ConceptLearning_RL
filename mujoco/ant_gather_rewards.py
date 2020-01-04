@@ -13,27 +13,28 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
                  xml_file='ant_v2_square_green.xml',
                  ctrl_cost_weight=0,
-                 contact_cost_weight=5e-5,
+                 contact_cost_weight=0.0,
                  healthy_reward=0.0,
                  terminate_when_unhealthy=True,
                  healthy_z_range=(0.2, 1.0),
                  contact_force_range=(-10.0, 10.0),
                  reset_noise_scale=0.1,
                  velocity_reward_weight=1.0,
-                 catch_reward_weight=10.0,
+                 catch_reward_weight=20.0,
                  exclude_current_positions_from_observation=False,
                  rgb_rendering_tracking=True,
                  n_rays=20,
                  sensor_span=0.8*np.pi,
                  sensor_range=5,
-                 agent_object_spacing=3,
-                 object_object_spacing=3,
-                 room_length=18,
+                 agent_object_spacing=2,
+                 object_object_spacing=3.5,
+                 room_length=21,
                  object_radius=0.75,
                  catch_range=0.95,
                  n_targets=16,
                  n_bombs=0,
-                 n_steps_target_depletion=40):
+                 n_steps_target_depletion=40,
+                 save_init_quaternion=False):
         utils.EzPickle.__init__(**locals())
 
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -56,11 +57,16 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self._obstacle_filter = np.asarray([False, True], dtype=np.uint8)        
         self._n_rays = n_rays
         self._sensor_span = sensor_span
+        self._min_orientation_similarity = np.cos(sensor_span*0.5)
         self._sensor_range = sensor_range
         self._ray_angles = np.zeros(n_rays)
         for ray in range(self._n_rays):
             self._ray_angles[ray] = self._sensor_span * (- 0.5 + (2*ray + 1)/(2*self._n_rays))
         self._goal_readings = np.zeros(n_rays)
+        self._goal_sizes = np.zeros(n_rays)
+
+        self._init_rotation_quaternion = np.array([1.0, 0.0, 0.0, 0.0])
+        self._save_init_quaternion = save_init_quaternion
 
         self._obstacle_types = [0,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0]             
 
@@ -88,7 +94,7 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         p[:,2] = np.ones(self._n_objects)*0.85
         for i in range(0,self._n_objects):
             while not ((((p[i,:2] - p[:i,:2])**2).sum(1) > self._object_object_spacing**2).all() and (p[i,:2]**2).sum() > self._agent_object_spacing**2):
-                p[i,:2] = (np.random.rand(2)-0.5)*(self._room_length-3*self._object_radius)
+                p[i,:2] = (np.random.rand(2)-0.5)*(self._room_length-2.0-3*self._object_radius)
         self._object_positions = p.copy()
 
     def _obtain_ids(self):
@@ -111,19 +117,29 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def _update_objects(self):
         for i in range(0, self._n_objects):
             if self._objects_ON[i] >= 1.0 and self.in_catch_range[i]:
-                self._objects_ON[i] -= 1.0 
+                self._objects_ON[i] -= 1.0
+            elif self._objects_ON[i] < 1.0:
+                self.model.geom_pos[self._object_ids[i]] = -50*np.asarray([1.0,1.0,1.0], dtype=np.float64)
             self.model.geom_rgba[self._object_ids[i], 3] = self._objects_ON[i]/self._n_steps_target_depletion
 
     @property
     def orientation(self):
         a, vx, vy, vz = self.sim.data.qpos[3:7].copy() # rotation quaternion (roll-pitch-yaw)
-        orientation = [1-2*(vy**2+vz**2), 2*(vx*vy + a*vz), 2*(vx*vz - a*vy)]        
+        orientation = [1-2*(vy**2+vz**2), 2*(vx*vy + a*vz), 2*(vx*vz - a*vy)]
+        orientation /= np.dot(orientation,orientation)**0.5        
+        return orientation
+
+    @property
+    def orientation_z(self):
+        a, vx, vy, vz = self.sim.data.qpos[3:7].copy() # rotation quaternion (roll-pitch-yaw)
+        orientation = [2*(vx*vz - a*vy), 2*(vy*vz + a*vx), 1-2*(vx**2+vy**2)]
+        orientation /= np.dot(orientation,orientation)**0.5        
         return orientation
 
     @property
     def xy_orientation(self):
         orientation = np.array(self.orientation[:2])
-        orientation /= np.dot(orientation,orientation)
+        orientation /= np.dot(orientation,orientation)**0.5
         return orientation
 
     def ray_orientation(self, theta):
@@ -146,6 +162,7 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def get_current_maze_obs(self):   
         wall_readings = np.zeros(self._n_rays)
         self._goal_readings = np.zeros(self._n_rays)
+        self._goal_sizes = np.zeros(self._n_rays)
         danger_readings = np.zeros(self._n_rays)
 
         for ray in range(self._n_rays):
@@ -157,12 +174,14 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
                     wall_readings[ray] = (self._sensor_range - distance) / self._sensor_range
                 elif self._obstacle_types[obstacle_id] == 2 and self._objects_ON[obstacle_id-5] >= 1.0:
                     self._goal_readings[ray] = (self._sensor_range - distance) / self._sensor_range
+                    self._goal_sizes[ray] = self._objects_ON[obstacle_id-5] / self._n_steps_target_depletion
                 elif self._obstacle_types[obstacle_id] == 3 and self._objects_ON[obstacle_id-5] >= 1.0:
                     danger_readings[ray] = (self._sensor_range - distance) / self._sensor_range            
 
         obs = np.concatenate([
             wall_readings.copy(),
-            self._goal_readings.copy()# ,
+            self._goal_readings.copy(),
+            self._goal_sizes.copy()# ,
             # danger_readings.copy()
         ])
         
@@ -182,8 +201,11 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         return self.sim.data.qvel.flat.copy()[:2]
 
     @property    
-    def velocity_reward(self):        
-        velocity_reward = self._velocity_reward_weight * np.dot(self.xy_velocity, self.xy_orientation)
+    def velocity_reward(self):
+        speed = np.dot(self.xy_velocity, self.xy_velocity)**0.5
+        velocity_direction = self.xy_velocity / speed
+        similarity = np.dot(velocity_direction, self.xy_orientation)
+        velocity_reward = self._velocity_reward_weight * speed * np.sign(similarity)*similarity**2
         return velocity_reward
 
     @property
@@ -191,8 +213,15 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         return ((self._object_positions - self.body_position.reshape(1,-1))**2).sum(1) <= self._catch_range**2
 
     @property
+    def in_angle_range(self):
+        v = self._object_positions - self.body_position.reshape(1,-1)
+        v /= ((v**2).sum(1, keepdims=True))**0.5
+        orientation_similarity = (v[:,:2] * self.xy_orientation.reshape(1,-1)).sum(1)        
+        return orientation_similarity >= self._min_orientation_similarity
+
+    @property
     def gathering_reward(self):
-        return np.dot(self.in_catch_range.copy()*self._target_in_sight, self._objects_ON.copy().clip(0.0,1.0)) * self._catch_reward_weight
+        return np.dot(self.in_catch_range.copy()*self.in_angle_range.copy()*self._target_in_sight, self._objects_ON.copy().clip(0.0,1.0)) * self._catch_reward_weight
 
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
@@ -216,7 +245,9 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         state = self.state_vector()
         min_z, max_z = self._healthy_z_range
         min_xy, max_xy = -self._room_length/2, self._room_length/2
-        is_healthy = (np.isfinite(state).all() and min_z <= state[2] <= max_z and min_xy <= state[0] <= max_xy and min_xy <= state[1] <= max_xy)
+        is_healthy = (np.isfinite(state).all() and min_z <= state[2] <= max_z and 
+                        min_xy <= state[0] <= max_xy and min_xy <= state[1] <= max_xy and
+                        np.sqrt(2.0)*np.abs(self.orientation[2])<1.0 and self.orientation_z[2] >= 0.5)
         return is_healthy
 
     @property
@@ -276,15 +307,17 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         contact_force = self.contact_forces.flat.copy()
         maze_obs = self.get_current_maze_obs()
 
-        if self._exclude_current_positions_from_observation:
-            position = position[2:]
-
         # print("Maze obs:")
         # print(np.around(maze_obs*10,1))
         # print("Contact force:")
         # print(contact_force)
 
-        observations = np.concatenate((position, velocity, maze_obs))
+        quaternion = self._init_rotation_quaternion if self._save_init_quaternion else position[3:7]
+
+        if self._exclude_current_positions_from_observation:
+            position = position[2:]
+
+        observations = np.concatenate((position, velocity, quaternion, maze_obs))
 
         return observations
 
@@ -293,13 +326,22 @@ class AntGatherREnv(mujoco_env.MujocoEnv, utils.EzPickle):
         noise_high = self._reset_noise_scale
 
         qpos = self.init_qpos + self.np_random.uniform(
-            low=noise_low, high=noise_high, size=self.model.nq)
+            low=noise_low, high=noise_high, size=self.model.nq)        
+        
+        angle = (np.random.rand()-0.5)*2.0*np.pi
+        qpos[3] = np.cos(angle/2.0)
+        qpos[4] = qpos[5] = 0.0
+        qpos[6] = np.sin(angle/2.0)
+
+        self._init_rotation_quaternion = qpos[3:7].copy()
+
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.randn(
             self.model.nv)
         self.set_state(qpos, qvel)
 
         self._reset_objects()
         self._goal_readings = np.zeros(self._n_rays)
+        self._goal_sizes = np.zeros(self._n_rays)
 
         observation = self._get_obs()
 

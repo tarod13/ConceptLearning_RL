@@ -10,9 +10,9 @@ DEFAULT_CAMERA_CONFIG = {
 }
 
 
-class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
+class AntStraightLineRestrictedEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
-                 xml_file='ant_v2.xml',
+                 xml_file='ant_v2_square.xml',
                  ctrl_cost_weight=0,
                  contact_cost_weight=0.0,
                  healthy_reward=0.0, # 1.0
@@ -26,7 +26,7 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  n_rays=20,
                  sensor_span=np.pi*0.8,
                  sensor_range=5,
-                 save_init_quaternion=True):
+                 save_init_quaternion=False):
         utils.EzPickle.__init__(**locals())
 
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -82,11 +82,6 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         orientation /= np.dot(orientation,orientation)**0.5
         return orientation
 
-    @property
-    def xy_orientation_angle(self):
-        x, y = self.xy_orientation
-        return (np.arctan2(y, x) + np.pi)/(2*np.pi)
-
     def ray_orientation(self, theta):
         orientation_quaternion = [0, np.cos(theta), np.sin(theta), 0]
         rotation_quaternion = self.sim.data.qpos[3:7].copy()
@@ -126,40 +121,22 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         obs = np.concatenate([
             wall_readings.copy(),
             self._goal_readings.copy(),
-            self._goal_sizes.copy()# ,
-            # danger_readings.copy()
+            self._goal_sizes.copy()#,
+            #danger_readings.copy()
         ])
-        
-        self._target_in_sight = self._goal_readings.sum() > 0.0
-
         return obs
-
-    def rotate_vector(self, angle, vector):
-        c = np.cos(angle)
-        s = np.sin(angle)
-        rotation_matrix = np.array([[ c, s],
-                      [-s, c]])
-        return np.dot(rotation_matrix, vector) 
 
     @property
     def xy_velocity(self):
         return self.sim.data.qvel.flat.copy()[:2]
 
-    def velocity_reward(self, xy_velocity):
-        speed = np.dot(xy_velocity, xy_velocity)**0.5
-        velocity_direction = xy_velocity / speed
-        half_cosine, half_sine = self._init_rotation_quaternion[[0,3]]
-        similarity = np.dot(velocity_direction + self.xy_orientation, np.array([1-2*half_sine**2, 2*half_cosine*half_sine]))
-        velocity_reward = self._velocity_reward_weight * speed * similarity * 0.5
+    @property    
+    def velocity_reward(self):
+        speed = np.dot(self.xy_velocity, self.xy_velocity)**0.5
+        velocity_direction = self.xy_velocity / speed
+        similarity = np.dot(velocity_direction, self.xy_orientation)
+        velocity_reward = self._velocity_reward_weight * speed * np.sign(similarity)*similarity**2
         return velocity_reward
-
-    def angular_velocity_cost(self, orientation_before):
-        x_before, y_before = orientation_before
-        angle_before = np.arctan2(y_before, x_before)
-        x_rotated, y_rotated = self.rotate_vector(angle_before, self.xy_orientation)        
-        angle_in_previous_frame = np.arctan2(y_rotated, x_rotated)
-        velocity = angle_in_previous_frame/(np.pi * self.dt)
-        return self._velocity_reward_weight * np.abs(velocity)
 
     @property
     def healthy_reward(self):
@@ -201,7 +178,6 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
     def step(self, action):
         xy_position_before = self.get_body_com("torso")[:2].copy()
-        #xy_orientation_before = self.xy_orientation
         self.do_simulation(action, self.frame_skip)
         xy_position_after = self.get_body_com("torso")[:2].copy()
 
@@ -210,13 +186,12 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
         ctrl_cost = self.control_cost(action)
         contact_cost = self.contact_cost
-        #angular_velocity_cost = self.angular_velocity_cost(xy_orientation_before)
 
-        forward_reward = self.velocity_reward(xy_velocity)
+        forward_reward = self.velocity_reward
         healthy_reward = self.healthy_reward        
 
         rewards = forward_reward + healthy_reward 
-        costs = ctrl_cost + contact_cost #+ angular_velocity_cost
+        costs = ctrl_cost + contact_cost
 
         reward = rewards - costs
         goal_reward =  reward
@@ -234,8 +209,7 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             'distance_from_origin': np.linalg.norm(xy_position_after, ord=2),
 
             'x_velocity': x_velocity,
-            'y_velocity': y_velocity,
-            'angle': self.xy_orientation_angle     
+            'y_velocity': y_velocity     
         }
 
         return observation, reward, done, info
@@ -291,12 +265,12 @@ class AntStraightLineEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     #             getattr(self.viewer.cam, key)[:] = value
     #         else:
     #             setattr(self.viewer.cam, key, value)
-    def viewer_setup(self):
-        self.viewer.cam.trackbodyid = 0
-        self.viewer.cam.distance = self.model.stat.extent * 4
-        self.viewer.cam.elevation = -55
     # def viewer_setup(self):
-    #     self.viewer.cam.distance = self.model.stat.extent * 0.75
-    #     self.viewer.cam.elevation = -55
-    #     self.viewer.cam.lookat[0] = 0
-    #     self.viewer.cam.lookat[2] = 0
+    #     self.viewer.cam.trackbodyid = 2
+    #     self.viewer.cam.distance = self.model.stat.extent * 1
+    #     self.viewer.cam.elevation = -40
+    def viewer_setup(self):
+        self.viewer.cam.distance = self.model.stat.extent * 0.85
+        self.viewer.cam.elevation = -55
+        self.viewer.cam.lookat[0] = 0
+        self.viewer.cam.lookat[2] = 0

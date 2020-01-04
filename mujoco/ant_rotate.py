@@ -13,7 +13,7 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
                  xml_file='ant_v2.xml',
                  ctrl_cost_weight=0,
-                 contact_cost_weight=5e-5,
+                 contact_cost_weight=0.0,
                  healthy_reward=0.0,
                  terminate_when_unhealthy=True,
                  healthy_z_range=(0.2, 1.0),
@@ -24,7 +24,8 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  rgb_rendering_tracking=True,
                  n_rays=20,
                  sensor_span=0.8*np.pi,
-                 sensor_range=5):
+                 sensor_range=5,
+                 save_init_quaternion=True):
         utils.EzPickle.__init__(**locals())
 
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -50,6 +51,10 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         for ray in range(self._n_rays):
             self._ray_angles[ray] = self._sensor_span * (- 0.5 + (2*ray + 1)/(2*self._n_rays))
         self._goal_readings = np.zeros(n_rays)
+        self._goal_sizes = np.zeros(n_rays)
+
+        self._init_rotation_quaternion = np.array([1.0, 0.0, 0.0, 0.0])
+        self._save_init_quaternion = save_init_quaternion
         
         self._obstacle_types = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]        
 
@@ -74,13 +79,21 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     @property
     def orientation(self):
         a, vx, vy, vz = self.sim.data.qpos[3:7].copy() # rotation quaternion (roll-pitch-yaw)
-        orientation = [1-2*(vy**2+vz**2), 2*(vx*vy + a*vz), 2*(vx*vz - a*vy)]        
+        orientation = [1-2*(vy**2+vz**2), 2*(vx*vy + a*vz), 2*(vx*vz - a*vy)]
+        orientation /= np.dot(orientation,orientation)**0.5        
+        return orientation
+
+    @property
+    def orientation_z(self):
+        a, vx, vy, vz = self.sim.data.qpos[3:7].copy() # rotation quaternion (roll-pitch-yaw)
+        orientation = [2*(vx*vz - a*vy), 2*(vy*vz + a*vx), 1-2*(vx**2+vy**2)]
+        orientation /= np.dot(orientation,orientation)**0.5        
         return orientation
 
     @property
     def xy_orientation(self):
         orientation = np.array(self.orientation[:2])
-        orientation /= np.dot(orientation,orientation)
+        orientation /= np.dot(orientation,orientation)**0.5
         return orientation
 
     @property
@@ -97,6 +110,7 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def get_current_maze_obs(self):   
         wall_readings = np.zeros(self._n_rays)
         self._goal_readings = np.zeros(self._n_rays)
+        self._goal_sizes = np.zeros(self._n_rays)
         danger_readings = np.zeros(self._n_rays)
 
         for ray in range(self._n_rays):
@@ -106,16 +120,21 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             if obstacle_id >= 0 and distance <= self._sensor_range:
                 if self._obstacle_types[obstacle_id] == 1:
                     wall_readings[ray] = (self._sensor_range - distance) / self._sensor_range
-                elif self._obstacle_types[obstacle_id] == 2:
+                elif self._obstacle_types[obstacle_id] == 2 and self._objects_ON[obstacle_id-5] >= 1.0:
                     self._goal_readings[ray] = (self._sensor_range - distance) / self._sensor_range
-                elif self._obstacle_types[obstacle_id] == 3:
+                    self._goal_sizes[ray] = self._objects_ON[obstacle_id-5] / self._n_steps_target_depletion
+                elif self._obstacle_types[obstacle_id] == 3 and self._objects_ON[obstacle_id-5] >= 1.0:
                     danger_readings[ray] = (self._sensor_range - distance) / self._sensor_range            
 
         obs = np.concatenate([
             wall_readings.copy(),
-            self._goal_readings.copy()# ,
+            self._goal_readings.copy(),
+            self._goal_sizes.copy()# ,
             # danger_readings.copy()
         ])
+        
+        self._target_in_sight = self._goal_readings.sum() > 0.0
+
         return obs
 
     def rotate_vector(self, angle, vector):
@@ -161,7 +180,7 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def is_healthy(self):
         state = self.state_vector()
         min_z, max_z = self._healthy_z_range
-        is_healthy = (np.isfinite(state).all() and min_z <= state[2] <= max_z)
+        is_healthy = (np.isfinite(state).all() and min_z <= state[2] <= max_z and np.sqrt(2.0)*np.abs(self.orientation[2])<1.0 and self.orientation_z[2] >= 0.5)
         return is_healthy
 
     @property
@@ -182,12 +201,13 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         
         ctrl_cost = self.control_cost(action)
         contact_cost = self.contact_cost
+        velocity_cost = np.sqrt((xy_velocity**2).sum()) * self._velocity_reward_weight
 
         angular_velocity_reward = self.velocity_reward(xy_orientation_before)
         healthy_reward = self.healthy_reward
         
         rewards = healthy_reward + angular_velocity_reward
-        costs = ctrl_cost + contact_cost
+        costs = ctrl_cost + contact_cost + velocity_cost
 
         reward = rewards - costs
         goal_reward = reward
@@ -204,7 +224,8 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             'distance_from_origin': np.linalg.norm(xy_position_after, ord=2),
 
             'x_velocity': x_velocity,
-            'y_velocity': y_velocity    
+            'y_velocity': y_velocity,
+            'angle': self.xy_orientation_angle    
         }
 
         return observation, reward, done, info
@@ -215,15 +236,17 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         contact_force = self.contact_forces.flat.copy()
         maze_obs = self.get_current_maze_obs()
 
-        if self._exclude_current_positions_from_observation:
-            position = position[2:]
-
         # print("Maze obs:")
         # print(np.around(maze_obs*10,1))
         # print("Contact force:")
         # print(contact_force)
 
-        observations = np.concatenate((position, velocity, maze_obs))
+        quaternion = self._init_rotation_quaternion if self._save_init_quaternion else position[3:7]
+
+        if self._exclude_current_positions_from_observation:
+            position = position[2:]
+
+        observations = np.concatenate((position, velocity, quaternion, maze_obs))
 
         return observations
 
@@ -232,12 +255,21 @@ class AntRotateEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         noise_high = self._reset_noise_scale
 
         qpos = self.init_qpos + self.np_random.uniform(
-            low=noise_low, high=noise_high, size=self.model.nq)
+            low=noise_low, high=noise_high, size=self.model.nq)        
+        
+        angle = (np.random.rand()-0.5)*2.0*np.pi
+        qpos[3] = np.cos(angle/2.0)
+        qpos[4] = qpos[5] = 0.0
+        qpos[6] = np.sin(angle/2.0)
+
+        self._init_rotation_quaternion = qpos[3:7].copy()
+
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.randn(
             self.model.nv)
         self.set_state(qpos, qvel)
 
         self._goal_readings = np.zeros(self._n_rays)
+        self._goal_sizes = np.zeros(self._n_rays)
 
         observation = self._get_obs()
 
