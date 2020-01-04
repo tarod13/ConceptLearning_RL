@@ -29,10 +29,15 @@ def weights_init_(m):
         torch.nn.init.xavier_uniform_(m.weight, gain=1)
         torch.nn.init.constant_(m.bias, 0)
 
+def weights_init_noisy(m):
+    if isinstance(m, nn.Linear) or isinstance(m, parallel_Linear) or isinstance(m, parallel_Linear_simple):
+        torch.nn.init.kaiming_uniform_(m.weight, a=np.sqrt(5))
+        torch.nn.init.kaiming_uniform_(m.bias, a=np.sqrt(5))
+
 def weights_init_big(m):
     if isinstance(m, nn.Linear) or isinstance(m, parallel_Linear) or isinstance(m, parallel_Linear_simple):
-        torch.nn.init.normal_(m.weight)
-        torch.nn.init.normal_(m.bias)
+        torch.nn.init.xavier_uniform_(m.weight, gain=10.0)
+        torch.nn.init.xavier_uniform_(m.bias, gain=10.0)
 
 ###########################################################################
 #
@@ -41,6 +46,40 @@ def weights_init_big(m):
 ###########################################################################
 
 class Memory:
+    def __init__(self, capacity = 50000, n_seed=0):
+        self.capacity = capacity
+        self.data = []        
+        self.pointer = 0
+        set_seed(n_seed)
+    
+    def store(self, event):
+        if self.len_data < self.capacity:
+            self.data.append(None)
+        self.data[self.pointer] = event
+        self.pointer = (self.pointer + 1) % self.capacity
+    
+    def sample(self, batch_size):
+        if batch_size < len(self.data):
+            return random.sample(self.data, int(batch_size)) 
+        else:
+            return random.sample(self.data, self.len_data)
+
+    def retrieve(self):
+        return np.copy(self.data)
+    
+    def forget(self):
+        self.data = []
+        self.pointer = 0
+
+    @property
+    def empty(self):
+        return len(self.data) == 0
+    
+    @property
+    def len_data(self):
+        return len(self.data)
+
+class Memory_PER:
     def __init__(self, capacity = 50000, n_seed=0):
         self.capacity = capacity
         self.data = []        
@@ -60,7 +99,7 @@ class Memory:
         k = int(batch_size) if batch_size < len(self.data) else len(self.data)
         population = list(np.arange(self.len_data))
         sample = random.choices(population, weights=self.weights, k=k)
-        return [self.data[i] for i in sample], sample
+        return [self.data[i] for i in sample], sample, torch.FloatTensor([self.weights[i] for i in sample]).to(device)
 
     def update_weights(self, sample, weights):
         for s, w in zip(sample, weights):
@@ -205,37 +244,57 @@ class SumTree:
 class v_Net(nn.Module):
     def __init__(self, input_dim, n_tasks, lr=3e-4):
         super().__init__()        
-        self.l1 = nn.Linear(input_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, n_tasks)  
+        self.l1_E = nn.Linear(input_dim, 256)        
+        self.l2_E = nn.Linear(256, 256)
+        self.l3_E = nn.Linear(256, n_tasks)
+
+        # self.l1_I = nn.Linear(input_dim, 256)
+        # self.l2_I = nn.Linear(256, 256)        
+        # self.l3_I = nn.Linear(256, n_tasks)  
 
         self.apply(weights_init_)       
         self.loss_func = nn.MSELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)           
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
+
+        self.bn = nn.BatchNorm1d(256)        
     
     def forward(self, s):
-        x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
-        x = self.l3(x)
-        return(x)
+        x_E = F.relu(self.l1_E(s))
+        x_E = F.relu(self.l2_E(x_E))
+        V_E = self.l3_E(x_E)
+
+        # x_I = F.relu(self.l1_I(s))
+        # x_I = F.relu(self.l2_I(x_I))
+        # V_I = self.l3_I(x_I)
+        return V_E #, V_I
 
 class q_Net(nn.Module):
     def __init__(self, s_dim, a_dim, n_tasks, lr=3e-4):
         super().__init__()        
-        self.l1 = nn.Linear(s_dim+a_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, n_tasks)  
+        self.l1_E = nn.Linear(s_dim+a_dim, 256)
+        self.l2_E = nn.Linear(256, 256)
+        self.l3_E = nn.Linear(256, n_tasks)
+
+        # self.l1_I = nn.Linear(s_dim+a_dim, 256)
+        # self.l2_I = nn.Linear(256, 256)        
+        # self.l3_I = nn.Linear(256, n_tasks)    
 
         self.apply(weights_init_) 
         self.loss_func = nn.MSELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)    
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)   
+
+        self.bn = nn.BatchNorm1d(256) 
     
     def forward(self, s,a):
         x = torch.cat([s, a], 1)
-        x = F.relu(self.l1(x))
-        x = F.relu(self.l2(x))
-        x = self.l3(x)
-        return(x)
+        x_E = F.relu(self.l1_E(x))
+        x_E = F.relu(self.l2_E(x_E))
+        Q_E = self.l3_E(x_E)
+
+        # x_I = F.relu(self.l1_I(x))
+        # x_I = F.relu(self.l2_I(x_I))
+        # Q_I = self.l3_I(x_I)
+        return Q_E #, Q_I
 
 class m_Net(nn.Module):
     def __init__(self, n_concepts, n_skills, n_tasks, lr=3e-4):
@@ -264,28 +323,58 @@ class DQN(nn.Module):
         self.vision_channels = vision_channels
         self.kinematic_dim = s_dim - vision_dim*vision_channels 
 
-        self.l1 = parallel_Linear_simple(n_tasks, s_dim, 256)
-        self.l2 = parallel_Linear(n_tasks, 256, 256)
-        self.lV_E = parallel_Linear(n_tasks, 256, 1)
-        self.lV_I = parallel_Linear(n_tasks, 256, 1)
-        self.lA_E = parallel_Linear(n_tasks, 256, n_skills) 
-        self.lA_I = parallel_Linear(n_tasks, 256, n_skills)  
+        self.l11 = parallel_Linear_simple(n_tasks, s_dim, 256)
+        self.l12 = parallel_Linear_simple(n_tasks, s_dim, 256)
+        self.l21 = parallel_Linear(n_tasks, 256, 256)
+        self.l22 = parallel_Linear(n_tasks, 256, 256)
+        self.lV_E1 = parallel_Linear(n_tasks, 256, 1)
+        self.lV_E2 = parallel_Linear(n_tasks, 256, 1)
+        # self.lV_I = parallel_Linear(n_tasks, 256, 1)
+        self.lA_E1 = parallel_Linear(n_tasks, 256, n_skills)
+        self.lA_E2 = parallel_Linear(n_tasks, 256, n_skills) 
+        # self.lA_I = parallel_Linear(n_tasks, 256, n_skills)  
 
-        self.apply(weights_init_)
+        self.apply(weights_init_noisy)
         self.loss_func = nn.SmoothL1Loss() 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)    
     
-    def forward(self, s):
-        x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
-        V_E = self.lV_E(x)
-        V_I = self.lV_I(x)
-        A_E = self.lA_E(x)
-        A_I = self.lA_I(x)
+    def forward(self, s):        
+        mu = self.l11(s)
+        log_sigma = self.l12(s).clamp(-4.0,2.0)
+        ei = torch.randn(mu.size(0), self.n_tasks, 1).to(device)
+        ej = torch.randn(1, self.n_tasks, mu.size(2)).to(device)
+        eij = torch.sign(ei)*torch.sign(ej)*(ei).abs()**0.5*(ej).abs()**0.5
+        x = F.relu(mu + eij*torch.exp(log_sigma))
+
+        mu = self.l21(x)
+        log_sigma = self.l22(x).clamp(-4.0,2.0)
+        ei = torch.randn(mu.size(0), self.n_tasks, 1).to(device)
+        ej = torch.randn(1, self.n_tasks, mu.size(2)).to(device)
+        eij = torch.sign(ei)*torch.sign(ej)*(ei).abs()**0.5*(ej).abs()**0.5
+        x = F.relu(mu + eij*torch.exp(log_sigma))
+
+        muV = self.lV_E1(x)
+        log_sigmaV = self.lV_E2(x).clamp(-4.0,2.0)
+        eiV = torch.randn(muV.size(0), self.n_tasks, 1).to(device)
+        ejV = torch.randn(1, self.n_tasks, muV.size(2)).to(device)
+        eijV = torch.sign(eiV)*torch.sign(ejV)*(eiV).abs()**0.5*(ejV).abs()**0.5
+        V_E = muV + eijV*torch.exp(log_sigmaV)
+
+        muA = self.lA_E1(x)
+        log_sigmaA = self.lA_E2(x).clamp(-4.0,2.0)
+        eiA = torch.randn(muA.size(0), self.n_tasks, 1).to(device)
+        ejA = torch.randn(1, self.n_tasks, muA.size(2)).to(device)
+        eijA = torch.sign(eiA)*torch.sign(ejA)*(eiA).abs()**0.5*(ejA).abs()**0.5
+        A_E = muA + eijA*torch.exp(log_sigmaA)
+
+        # V_E = self.lV_E(x)
+        # V_I = self.lV_I(x)
+        # A_E = self.lA_E(x)
+        # A_I = self.lA_I(x)
         Q_E = V_E + A_E - A_E.mean(2, keepdim=True) #.view(-1, self.n_tasks, self.n_skills)
-        Q_I = V_I + A_I - A_I.mean(2, keepdim=True)
-        return Q_E, Q_I   
-        
+        # Q_I = V_I + A_I - A_I.mean(2, keepdim=True)
+        return Q_E #, Q_I 
+
     #     nc1 = vision_channels * 2
     #     nc2 = vision_channels * 4
     #     nc3 = vision_channels * 8
@@ -326,8 +415,11 @@ class DQN(nn.Module):
     #     self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
 
     #     self.lc1x1 = nn.Conv1d(nc4, n_tasks, 1, stride=1)
-    #     self.lkv1 = parallel_Linear(n_tasks, v_dim4+k_dim4, 256)
-    #     self.lkv2 = parallel_Linear(n_tasks, 256, n_skills)
+    #     self.lkv = parallel_Linear(n_tasks, v_dim4+k_dim4, 256)
+    #     self.lA_E = parallel_Linear(n_tasks, 256, n_skills)
+    #     self.lA_I = parallel_Linear(n_tasks, 256, n_skills)
+    #     self.lV_E = parallel_Linear(n_tasks, 256, 1)
+    #     self.lV_I = parallel_Linear(n_tasks, 256, 1)
         
     #     self.bn1 = nn.BatchNorm1d(nc1)
     #     self.bn2 = nn.BatchNorm1d(nc2)
@@ -337,7 +429,7 @@ class DQN(nn.Module):
                         
     #     self.apply(weights_init_)
 
-    #     self.loss_func = nn.MSELoss()
+    #     self.loss_func = nn.SmoothL1Loss(reduction='none')
     #     self.optimizer = optim.Adam(self.parameters(), lr=lr)       
 
     # def forward(self, s):
@@ -356,21 +448,26 @@ class DQN(nn.Module):
 
     #     x = torch.cat([k,v],2)
     #     x = F.relu(self.bn5(self.lc1x1(x)))
-    #     x = F.relu(self.bn5(self.lkv1(x)))
-    #     x = self.lkv2(x)
-
-    #     return x    
+    #     x = F.relu(self.bn5(self.lkv(x)))
+    #     V_E = self.lV_E(x)
+    #     V_I = self.lV_I(x)
+    #     A_E = self.lA_E(x)
+    #     A_I = self.lA_I(x)
+    #     Q_E = V_E + A_E - A_E.mean(2, keepdim=True) #.view(-1, self.n_tasks, self.n_skills)
+    #     Q_I = V_I + A_I - A_I.mean(2, keepdim=True)        
+    #     return Q_E, Q_I  
+  
 
 class RND_subNet(nn.Module):
-    def __init__(self, s_dim, out_dim):
+    def __init__(self, s_dim, out_dim, n_tasks, target=False):
         super().__init__()  
         self.s_dim = s_dim
         
-        self.l1 = nn.Linear(s_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, out_dim)
+        self.l1 = parallel_Linear_simple(n_tasks, s_dim, 256)
+        self.l2 = parallel_Linear(n_tasks, 256, 256)
+        self.l3 = parallel_Linear(n_tasks, 256, out_dim)
 
-        self.apply(weights_init_big)        
+        self.apply(weights_init_big) if target else self.apply(weights_init_)        
     
     def forward(self, s):
         x = F.relu(self.l1(s))
@@ -379,37 +476,99 @@ class RND_subNet(nn.Module):
         return(x)
 
 class RND_Net(nn.Module):
-    def __init__(self, s_dim, out_dim=20, lr=3e-4, alpha=1e-2):
+    def __init__(self, s_dim, n_tasks, out_dim=20, lr=3e-4, alpha=1e-2):
         super().__init__() 
         self.s_dim = s_dim
         self.out_dim = out_dim
         self.alpha = alpha
+        self.n_tasks = n_tasks
         
-        self.target = RND_subNet(s_dim, out_dim)
-        self.predictor = RND_subNet(s_dim, out_dim) 
+        self.target = RND_subNet(s_dim, out_dim, n_tasks, target=True)
+        self.predictor = RND_subNet(s_dim, out_dim, n_tasks) 
 
         self.optimizer = optim.Adam(self.predictor.parameters(), lr=lr)
 
-        self.mean_s = torch.zeros(1,s_dim).to(device)
-        self.std_s = 1e-4*torch.ones(1,s_dim).to(device)
-        self.std_e = 1.0        
+        self.mean_s = torch.zeros(n_tasks, s_dim).to(device)
+        self.std_s = 1e-4*torch.ones(n_tasks, s_dim).to(device)
+        self.std_e = torch.ones(n_tasks, 1).to(device)        
     
-    def forward(self, s):
-        self.mean_s = (1.0-self.alpha) * self.mean_s + self.alpha * s.detach().mean(0, keepdim=True)
-        self.std_s = (1.0-self.alpha) * self.std_s + self.alpha * (((s.detach() - self.mean_s)**2).mean(0, keepdim=True))**0.5
+    def forward(self, s, t):
+        t_one_hot = np.zeros([t.shape[0], self.n_tasks])
+        t_one_hot[np.arange(t.shape[0]), t] = np.ones(t.shape[0])
+        t_one_hot_distribution = torch.from_numpy(t_one_hot / (t_one_hot.sum(0, keepdims=True) + 1e-10)).float().to(device)
 
-        s_normalized = (s - self.mean_s) / self.std_s
+        self.mean_s = (1.0-self.alpha) * self.mean_s + self.alpha * (s.unsqueeze(1).detach() * t_one_hot_distribution.unsqueeze(2)).sum(0)
+        self.std_s = (1.0-self.alpha) * self.std_s + self.alpha * ((((s.detach() - self.mean_s[t,:])**2).unsqueeze(1) * t_one_hot_distribution.unsqueeze(2)).sum(0))**0.5
+
+        s_normalized = (s - self.mean_s[t,:]) / self.std_s[t,:]
         s_normalized = s_normalized.clamp(-5.0,5.0)
 
         noise = self.target(s_normalized)
         prediction = self.predictor(s_normalized)
-        error = ((prediction - noise)**2).sum(1, keepdim=True)
+        error = (((prediction - noise)[np.arange(t.shape[0]), t, :])**2).sum(1, keepdim=True)
 
-        self.std_e = (1.0-self.alpha) * self.std_e + self.alpha * ((error.detach()**2).mean())**0.5
+        self.std_e = (1.0-self.alpha) * self.std_e + self.alpha * (((error.detach()**2).unsqueeze(1) * t_one_hot_distribution.unsqueeze(2)).sum(0))**0.5
 
-        error_normalized = error / self.std_e
+        error_normalized = error / self.std_e[t,:]
         
         return(error_normalized) 
+
+class d_Net(nn.Module):
+    def __init__(self, s_dim, n_tasks, min_log_stdev=-4, max_log_stdev=2, lr=3e-4, alpha=0.99, beta=5.0e0, max_C=np.log(2), delta_C=np.log(2)*1.0e-5, C_0=0.0):
+        super().__init__()  
+        self.s_dim = s_dim
+        self.n_tasks = n_tasks   
+        self.min_log_stdev = min_log_stdev
+        self.max_log_stdev = max_log_stdev
+        self.alpha = alpha
+        self.beta = beta
+        self.max_C = max_C
+        self.delta_C = delta_C
+        self.C = C_0
+        
+        self.l1 = parallel_Linear_simple(n_tasks, self.s_dim, (self.s_dim*3)//4)
+        self.l2 = parallel_Linear(n_tasks, (self.s_dim*3)//4, (self.s_dim*1)//2)
+        self.l31 = parallel_Linear(n_tasks, (self.s_dim*1)//2, (self.s_dim*1)//4)
+        self.l32 = parallel_Linear(n_tasks, (self.s_dim*1)//2, (self.s_dim*1)//4)
+        self.l4 = parallel_Linear(n_tasks, (self.s_dim*1)//4, (self.s_dim*1)//2)
+        self.l5 = parallel_Linear(n_tasks, (self.s_dim*1)//2, (self.s_dim*3)//4)
+        self.l6 = parallel_Linear(n_tasks, (self.s_dim*3)//4, self.s_dim)
+        
+        self.apply(weights_init_) 
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
+
+        self.estimated_mean = torch.zeros(1,s_dim).to(device)
+        self.estimated_std = torch.zeros(1,s_dim).to(device)
+    
+    def forward(self, s, t):
+        x = torch.tanh(self.l1(s))
+        x = torch.tanh(self.l2(x))
+        mu_z = self.l31(x)
+        log_sigma_z = self.l32(x)
+        log_sigma_z = torch.clamp(log_sigma_z, self.min_log_stdev, self.max_log_stdev)
+
+        ei = torch.randn(mu_z.size(0), self.n_tasks, 1).to(device)
+        ej = torch.randn(1, self.n_tasks, mu_z.size(2)).to(device)
+        eij = torch.sign(ei)*torch.sign(ej)*(ei).abs()**0.5*(ej).abs()**0.5
+        y = mu_z + eij*torch.exp(log_sigma_z)
+        y = torch.tanh(self.l4(y))
+        y = torch.tanh(self.l5(y))
+        y = self.l6(y)
+
+        self.estimated_mean = (self.alpha * self.estimated_mean + (1.0-self.alpha) * s.mean(0, keepdim=True)).detach()
+        self.estimated_std = (self.alpha * self.estimated_std + (1.0-self.alpha) * ((s-self.estimated_mean)**2).mean(0, keepdim=True)**0.5).detach()
+        
+        return y[np.arange(t.shape[0]), t, :], mu_z[np.arange(t.shape[0]), t, :], log_sigma_z[np.arange(t.shape[0]), t, :]
+    
+    def loss_func(self, s, y, mu_z, log_sigma_z):
+        posterior_error = (0.5*(mu_z**2 + torch.exp(log_sigma_z)**2 - 1) - log_sigma_z).sum(1).mean()
+        reconstruction_error = (((s - y) / (self.estimated_std+1e-6))**2).sum(1).mean()
+        loss = self.beta * (posterior_error - self.C).abs() + reconstruction_error
+
+        self.C = np.min([self.C + self.delta_C, self.max_C])
+
+        return loss
 
 #-------------------------------------------------------------
 #
@@ -505,7 +664,7 @@ class multichannel_Linear(nn.Module):
 #
 #-------------------------------------------------------------
 class c_Net(nn.Module):
-    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=2):
+    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=3):
         super().__init__()  
         self.n_tasks = n_tasks
         self.s_dim = s_dim   

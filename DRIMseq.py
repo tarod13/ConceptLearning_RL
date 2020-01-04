@@ -5,7 +5,7 @@ import numpy as np
 from torch.distributions import Categorical
 from torch.nn.utils import clip_grad_norm_
 
-from nets_seq import (Memory, v_Net, q_Net, DQN, s_Net, c_Net, RND_Net)
+from nets_seq import (Memory, v_Net, q_Net, DQN, s_Net, c_Net, RND_Net, d_Net)
 
 import os
 import time
@@ -90,14 +90,17 @@ class Agent:
                                         'sl': 1.0,
                                         'ql': 1.0
                                     },
-                            'init_epsilon': 1.0,
-                            'min_epsilon': 0.05,
+                            'init_epsilon': 0.00,
+                            'min_epsilon': 0.00,
                             'delta_epsilon': 1.6e-6,
                             'init_threshold_entropy_alpha': 0.0,
-                            'delta_threshold_entropy_alpha': 1.6e-5,
+                            'delta_threshold_entropy_alpha': 8e-6,
                             'min_threshold_entropy_alpha_ql': np.log(2),
                             'DQN_learning_type': 'DQL',
                             'DQL_epsds_target_update': 6000,
+                            'init_beta': 0.4,
+                            'max_beta': 1.0,
+                            'delta_beta': 3.0e-4/4.0,
                             
                             'lr': {
                                     'sl': {
@@ -117,6 +120,7 @@ class Agent:
 
                             'dim_excluded': {
                                         'init': 2,
+                                        'middle': 7,
                                         'last': 60
                                     },
                             
@@ -124,10 +128,10 @@ class Agent:
                                             'sl': 256,
                                             'ql': 256
                                         },
-
+                            'RND_factor': 1.0,
                             'memory_capacity': 400000,
-                            'gamma_E': 0.999,
-                            'gamma_I': 0.99,
+                            'gamma_E': 0.99,
+                            'gamma_I': 0.95,
                             'clip_value': 1.0                                                                                     
                         }
         
@@ -145,7 +149,10 @@ class Agent:
         self.n_tasks = n_tasks
         self.seed = seed
         self.n_skills = n_tasks['sl']
-        self.counter = 0
+        self.counter = {
+                        'sl': 0,
+                        'ql': 0
+                    }
 
         self.n_concepts = self.params['n_concepts']
         self.dim_excluded = self.params['dim_excluded']
@@ -157,6 +164,7 @@ class Agent:
         self.decision_type = self.params['decision_type']
         self.DQN_learning_type = self.params['DQN_learning_type']
         self.DQL_epsds_target_update = self.params['DQL_epsds_target_update']
+        self.RND_factor = self.params['RND_factor']
 
         # Metric weights
         self.min_threshold_entropy_alpha = {
@@ -177,36 +185,55 @@ class Agent:
         self.epsilon = self.params['init_epsilon']
         self.min_epsilon = self.params['min_epsilon']
         self.delta_epsilon = self.params['delta_epsilon']
+        self.beta = self.params['init_beta']
+        self.max_beta = self.params['max_beta']
+        self.delta_beta = self.params['delta_beta']
         
         # Nets and memory
         self.critic1 = {
                             'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
-                            'ql': DQN(s_dim-self.dim_excluded['init'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
+                            'ql': DQN(s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
                         }
         self.critic2 = {
                             'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
-                            'ql': DQN(s_dim-self.dim_excluded['init'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
+                            'ql': DQN(s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device)
                         }
         self.v = {
                             'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
-                            'ql': v_Net(s_dim-self.dim_excluded['init'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
+                            'ql': v_Net(s_dim-self.dim_excluded['middle'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
                         }
         self.v_target = {
                             'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
-                            'ql': v_Net(s_dim-self.dim_excluded['init'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
+                            'ql': v_Net(s_dim-self.dim_excluded['middle'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device)
                         }
         self.actor = s_Net(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['sl']['pi']).to(device)
+        self.classifier = c_Net(self.n_concepts, s_dim-self.dim_excluded['init'], self.n_skills+1, n_tasks=self.n_tasks['ql'])
 
         self.memory = {
                         'sl':  Memory(self.params['memory_capacity'], n_seed=self.seed),
                         'ql':  Memory(self.params['memory_capacity'], n_seed=self.seed)
                     }
         
-        self.RNDnet = RND_Net(s_dim-self.dim_excluded['init']).to(device)
+        # self.RNDnet = {
+        #                 'sl': RND_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), self.n_tasks['sl']).to(device),
+        #                 'ql': RND_Net(s_dim-self.dim_excluded['init'], self.n_tasks['ql']).to(device)
+        #             }
+
+        # self.density = d_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), self.n_tasks['sl']).to(device)
+        # self.density_target = torch.ones(self.n_tasks['sl'], 8).float().to(device)/8.0
+        # self.density = torch.ones(self.n_tasks['sl'], 8).float().to(device)/8.0
+        # self.prior_weight = 8*1000
 
         updateNet(self.v_target['sl'], self.v['sl'],1.0)
         updateNet(self.critic2['ql'], self.critic1['ql'],1.0)    
     
+    # def update_density(self, task, idx):
+    #     self.density[task, idx] += 1.0/self.prior_weight
+    #     self.density[task, :] /= 1.0+1.0/self.prior_weight
+
+    # def update_target_density(self):
+    #     self.density_target = self.density.clone()
+
     def memorize(self, event, learning_type, init=False):
         if init:
             self.memory[learning_type].store(event[np.newaxis,:])
@@ -218,7 +245,7 @@ class Agent:
         return skill
 
     def decide_q_dist(self, state, task, explore=True):
-        s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:]).to(device).view(1,-1)
+        s_cuda = torch.FloatTensor(state[self.dim_excluded['middle']:]).to(device).view(1,-1)
         q = self.critic1['ql'](s_cuda).squeeze(0)[task,:] if np.random.rand() > 0.5 else self.critic2['ql'](s_cuda).squeeze(0)[task,:]
         with torch.no_grad():
             pi = torch.exp((q-q.max())/(self.alpha['ql'][task]+1e-6)).view(-1)
@@ -227,12 +254,15 @@ class Agent:
             return skill
 
     def decide_epsilon(self, state, task, explore=True):
-        s_cuda = torch.FloatTensor(state[self.dim_excluded['init']:]).to(device).view(1,-1)
+        s_cuda = torch.FloatTensor(state[self.dim_excluded['middle']:]).to(device).view(1,-1)
         with torch.no_grad():
-            qe, qi = self.critic1['ql'](s_cuda)
-            qe, qi = qe.squeeze(0)[task,:], qi.squeeze(0)[task,:]
-            epsilon = self.epsilon if explore else 0.0
-            skill = (qe+qi).argmax().item() if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
+            # qe, qi = self.critic1['ql'](s_cuda)
+            # qe, qi = qe.squeeze(0)[task,:], qi.squeeze(0)[task,:]
+            qe = self.critic1['ql'](s_cuda)
+            qe = qe.squeeze(0)[task,:]
+            # epsilon = self.epsilon if explore else 0.0
+            # skill = (qe+qi).argmax().item() if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
+            skill = (qe).argmax().item() # if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
             return skill            
 
     def act(self, state, skill, explore=True):
@@ -249,73 +279,74 @@ class Agent:
             return metrics
 
     def learn_DQN_DQL(self):
-        self.counter += 1
-        batch, indices = self.memory['ql'].sample(self.batch_size['ql'])
+        self.counter['ql'] += 1
+        # batch, indices, priorities = self.memory['ql'].sample(self.batch_size['ql'])
+        batch = self.memory['ql'].sample(self.batch_size['ql'])
         batch = np.array(batch)
         batch_size = batch.shape[0]
 
         if batch_size > 0:
-            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['init']:self.s_dim]).to(device)
+            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['middle']:self.s_dim]).to(device)
             A_batch = batch[:,self.s_dim].astype('int')
             r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1,1).to(device)
-            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['init']:2*self.s_dim+2]).to(device)
+            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['middle']:2*self.s_dim+2]).to(device)
             d_batch = torch.FloatTensor(batch[:,2*self.s_dim+2]).view(-1,1).to(device)
             T_batch = batch[:,2*self.s_dim+3].astype('int')  
 
             # Optimize q networks
-            qe, qi = self.critic1['ql'](s_batch)
-            qe, qi = qe[np.arange(batch_size), T_batch, A_batch].view(-1,1), qi[np.arange(batch_size), T_batch, A_batch].view(-1,1)
-            qen, qin = self.critic1['ql'](ns_batch)
-            qen, qin = qen[np.arange(batch_size), T_batch, :], qin[np.arange(batch_size), T_batch, :]
-            qen_target, qin_target =  self.critic2['ql'](ns_batch)
-            qen_target, qin_target =  qen_target[np.arange(batch_size), T_batch, :], qin_target[np.arange(batch_size), T_batch, :]
-            # q2 = self.critic2['ql'](s_batch)
-            # q = torch.min(torch.stack([q1, q2]), 0)[0].detach()
+            # qe, qi = self.critic1['ql'](s_batch)
+            # qe, qi = qe[np.arange(batch_size), T_batch, A_batch].view(-1,1), qi[np.arange(batch_size), T_batch, A_batch].view(-1,1)
+            # qen, qin = self.critic1['ql'](ns_batch)
+            # qen, qin = qen[np.arange(batch_size), T_batch, :], qin[np.arange(batch_size), T_batch, :]
+            # qen_target, qin_target =  self.critic2['ql'](ns_batch)
+            # qen_target, qin_target =  qen_target[np.arange(batch_size), T_batch, :], qin_target[np.arange(batch_size), T_batch, :]
+            qe = self.critic1['ql'](s_batch)
+            qe = qe[np.arange(batch_size), T_batch, A_batch].view(-1,1)
+            qen = self.critic1['ql'](ns_batch)
+            qen = qen[np.arange(batch_size), T_batch, :]
+            qen_target =  self.critic2['ql'](ns_batch)
+            qen_target =  qen_target[np.arange(batch_size), T_batch, :]
 
-            RDN_error = self.RNDnet(ns_batch)
-            best_skills = (qen+qin).argmax(1)
+            # RDN_error = self.RNDnet(ns_batch)
+            # best_skills = (qen+qin).argmax(1)
+            best_skills = qen.argmax(1)
             qe_approx = r_batch/10.0 + self.gamma_E * qen_target[np.arange(batch_size), best_skills].view(-1,1) * (1.0-d_batch)
-            qi_approx = RDN_error.detach() + self.gamma_I * qin_target[np.arange(batch_size), best_skills].view(-1,1) * (1.0-d_batch)
-                        
-            new_sampling_weights = list((qe + qi - qe_approx - qi_approx).squeeze(1).abs().detach().cpu().numpy())
-            self.memory['ql'].update_weights(indices, new_sampling_weights)
+            # qi_approx = RDN_error.detach() + self.gamma_I * qin_target[np.arange(batch_size), best_skills].view(-1,1) * (1.0-d_batch)
 
-            q_loss = self.critic1['ql'].loss_func(qe, qe_approx) + self.critic1['ql'].loss_func(qi, qi_approx)
+            # new_sampling_priorities = list((((qe + qi - qe_approx - qi_approx).squeeze(1).abs()+1e-2)**0.6).detach().cpu().numpy())
+
+            # IS_weights = (priorities.min()/priorities.view(-1,1))**self.beta
+            q_loss = self.critic1['ql'].loss_func(qe, qe_approx.detach())# + self.critic1['ql'].loss_func(qi, qi_approx.detach()))*IS_weights
             self.critic1['ql'].optimizer.zero_grad()
-            q_loss.backward()
+            q_loss.mean().backward()
             clip_grad_norm_(self.critic1['ql'].parameters(), self.clip_value)
             self.critic1['ql'].optimizer.step()
 
-            self.RNDnet.optimizer.zero_grad()
-            RDN_error.mean().backward()
-            clip_grad_norm_(self.RNDnet.predictor.parameters(), self.clip_value)
-            self.RNDnet.optimizer.step()
+            # self.RNDnet.optimizer.zero_grad()
+            # (RDN_error*IS_weights).mean().backward()
+            # clip_grad_norm_(self.RNDnet.predictor.parameters(), self.clip_value)
+            # self.RNDnet.optimizer.step()
+            
+            # self.memory['ql'].update_weights(indices, new_sampling_priorities)
 
-            if self.counter % self.DQL_epsds_target_update == 0:
+            if self.counter['ql'] % self.DQL_epsds_target_update == 0:
                 updateNet(self.critic2['ql'], self.critic1['ql'], 1.0)
-                self.counter = 0
+                self.counter['ql'] = 0
 
-            # updateNet(self.critic2['ql'], self.critic1['ql'], self.lr['ql']['v_target'])
-
-            # q2_loss = self.critic2['ql'].loss_func(q2_AT, q_approx.detach())
-            # self.critic2['ql'].optimizer.zero_grad()
-            # q2_loss.backward()
-            # clip_grad_norm_(self.critic2['ql'].parameters(), self.clip_value)
-            # self.critic2['ql'].optimizer.step()
-
-            # Anneal epsilon
+            # Anneal epsilon and beta
             self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])
+            # self.beta = np.min([self.beta + self.delta_beta, self.max_beta])
     
     def learn_DQN_SAC(self, only_metrics=False):
-        batch = self.memory['ql'].sample(self.batch_size['ql'])[0]
+        batch = self.memory['ql'].sample(self.batch_size['ql'])
         batch = np.array(batch)
         batch_size = batch.shape[0]
 
         if batch_size > 0:
-            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['init']:self.s_dim]).to(device)
+            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['middle']:self.s_dim]).to(device)
             A_batch = batch[:,self.s_dim].astype('int')
             r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1,1).to(device)
-            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['init']:2*self.s_dim+2]).to(device)
+            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['middle']:2*self.s_dim+2]).to(device)
             d_batch = torch.FloatTensor(batch[:,2*self.s_dim+2]).view(-1,1).to(device)
             T_batch = batch[:,2*self.s_dim+3].astype('int')  
 
@@ -384,7 +415,9 @@ class Agent:
             return metrics
     
     def learn_skills(self, only_metrics=False):
-        batch = self.memory['sl'].sample(self.batch_size['sl'])[0]
+        # if not only_metrics: self.counter['sl'] += 1
+
+        batch = self.memory['sl'].sample(self.batch_size['sl'])
         batch = np.array(batch)
         batch_size = batch.shape[0]
 
@@ -395,39 +428,71 @@ class Agent:
             ns_batch = torch.FloatTensor(batch[:,self.sa_dim+1+self.dim_excluded['init']:self.sars_dim-self.dim_excluded['last']]).to(device)
             d_batch = torch.FloatTensor(batch[:,self.sars_dim]).view(-1,1).to(device)
             T_batch = batch[:,self.sarsd_dim].astype('int')  
+            # angle_batch = batch[:,self.sarsd_dim+1].astype('int')  
 
             if not only_metrics:
                 # Optimize q networks
-                q1 = self.critic1['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                q2 = self.critic2['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                next_v = self.v_target['sl'](ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                q_approx = r_batch + self.gamma_E * next_v * (1-d_batch)
+                q1_E = self.critic1['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                q2_E = self.critic2['sl'](s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                next_v_E = self.v_target['sl'](ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                # q1_E, q1_I = self.critic1['sl'](s_batch, a_batch)
+                # q1_E, q1_I = q1_E[np.arange(batch_size), T_batch].view(-1,1), q1_I[np.arange(batch_size), T_batch].view(-1,1)
+                # q2_E, q2_I = self.critic2['sl'](s_batch, a_batch)
+                # q2_E, q2_I = q2_E[np.arange(batch_size), T_batch].view(-1,1), q2_I[np.arange(batch_size), T_batch].view(-1,1)
+                # next_v_E, next_v_I = self.v_target['sl'](ns_batch)
+                # next_v_E, next_v_I = next_v_E[np.arange(batch_size), T_batch].view(-1,1), next_v_I[np.arange(batch_size), T_batch].view(-1,1)
+                # RDN_error = self.RNDnet['sl'](ns_batch.detach(), T_batch)
+                # s_approx_batch, mu_latent, log_sigma_latent = self.density(s_batch, T_batch)
+                # density_loss = self.density.loss_func(s_batch, s_approx_batch, mu_latent, log_sigma_latent)
+
+                # angle_loss = np.log(1.0/8.0) - torch.log(self.density_target[T_batch, angle_batch]).view(-1,1)
+
+                q_approx_E = r_batch + self.gamma_E * next_v_E * (1-d_batch)
+                # q_approx_I = angle_loss + self.gamma_I * next_v_I * (1-d_batch)
+                # q_approx_I = RDN_error.detach() + self.gamma_I * next_v_I * (1-d_batch)
+                # q_approx_I = density_loss.detach() + self.gamma_I * next_v_I * (1-d_batch)
                 
-                q1_loss = self.critic1['sl'].loss_func(q1, q_approx.detach())
+                q1_loss = self.critic1['sl'].loss_func(q1_E, q_approx_E.detach()) # + self.critic1['sl'].loss_func(q1_I, q_approx_I.detach())
                 self.critic1['sl'].optimizer.zero_grad()
                 q1_loss.backward()
                 clip_grad_norm_(self.critic1['sl'].parameters(), self.clip_value)
                 self.critic1['sl'].optimizer.step()
                 
-                q2_loss = self.critic2['sl'].loss_func(q2, q_approx.detach())
+                q2_loss = self.critic2['sl'].loss_func(q2_E, q_approx_E.detach()) # + self.critic2['sl'].loss_func(q2_I, q_approx_I.detach())
                 self.critic2['sl'].optimizer.zero_grad()
                 q2_loss.backward()
                 clip_grad_norm_(self.critic2['sl'].parameters(), self.clip_value)
-                self.critic2['sl'].optimizer.step()                
+                self.critic2['sl'].optimizer.step()
+
+                # self.RNDnet['sl'].optimizer.zero_grad()
+                # RDN_error.mean().backward()
+                # clip_grad_norm_(self.RNDnet['sl'].predictor.parameters(), self.clip_value)
+                # self.RNDnet['sl'].optimizer.step()
+
+                # self.density.optimizer.zero_grad()
+                # density_loss.mean().backward()
+                # clip_grad_norm_(self.density.parameters(), self.clip_value)
+                # self.density.optimizer.step()                
 
             # Optimize v network
             a_batch_A, log_pa_sApT_A = self.actor.sample_actions_and_llhoods_for_all_skills(s_batch)
             a_batch = a_batch_A[np.arange(batch_size), T_batch, :]
             log_pa_sT = log_pa_sApT_A[np.arange(batch_size), :, T_batch]
             
-            q1_off = self.critic1['sl'](s_batch.detach(), a_batch)
-            q2_off = self.critic2['sl'](s_batch.detach(), a_batch)
-            q_off = torch.min(torch.stack([q1_off, q2_off]), 0)[0]
+            q1_off_E = self.critic1['sl'](s_batch.detach(), a_batch)
+            q2_off_E = self.critic2['sl'](s_batch.detach(), a_batch)
+            # q1_off_E, q1_off_I = self.critic1['sl'](s_batch.detach(), a_batch)
+            # q2_off_E, q2_off_I = self.critic2['sl'](s_batch.detach(), a_batch)
+            q_off_E = torch.min(torch.stack([q1_off_E, q2_off_E]), 0)[0]
+            # q_off_I = torch.min(torch.stack([q1_off_I, q2_off_I]), 0)[0]
             
-            v_approx = (q_off - self.alpha['sl'].view(1,-1) * log_pa_sT)[np.arange(batch_size), T_batch].view(-1,1) 
+            v_approx_E = (q_off_E - self.alpha['sl'].view(1,-1) * log_pa_sT)[np.arange(batch_size), T_batch].view(-1,1)
+            # v_approx_I = q_off_I[np.arange(batch_size), T_batch].view(-1,1) 
 
             if not only_metrics:
-                v = self.v['sl'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                v_E = self.v['sl'](s_batch)[np.arange(batch_size), T_batch].view(-1,1)
+                # v_E, v_I = self.v['sl'](s_batch)
+                # v_E, v_I = v_E[np.arange(batch_size), T_batch].view(-1,1), v_I[np.arange(batch_size), T_batch].view(-1,1) 
             
             task_mask = torch.zeros(batch_size, self.n_tasks['sl']).float().to(device)
             task_mask[np.arange(batch_size), T_batch] = torch.ones(batch_size).float().to(device)
@@ -437,7 +502,7 @@ class Agent:
             alpha_gradient = Ha_sT.detach() - self.threshold_entropy_alpha['sl']
 
             if not only_metrics:
-                v_loss = ((v - v_approx.detach())**2).mean()
+                v_loss = self.v['sl'].loss_func(v_E, v_approx_E.detach()) # + self.v['sl'].loss_func(v_I, v_approx_I.detach())
                 self.v['sl'].optimizer.zero_grad()
                 v_loss.backward()
                 clip_grad_norm_(self.v['sl'].parameters(), self.clip_value)
@@ -445,7 +510,7 @@ class Agent:
                 updateNet(self.v_target['sl'], self.v['sl'], self.lr['sl']['v_target'])
 
                 # Optimize skill network
-                pi_loss = (-v_approx).mean()
+                pi_loss = -(v_approx_E).mean()# /self.RND_factor + v_approx_I).mean()
                 self.actor.optimizer.zero_grad()
                 pi_loss.backward(retain_graph=True)
                 clip_grad_norm_(self.actor.parameters(), self.clip_value)
@@ -457,6 +522,10 @@ class Agent:
                 self.alpha['sl'] = torch.exp(log_alpha).clamp(1e-10, 1e+3)
 
                 self.threshold_entropy_alpha['sl'] = np.max([self.threshold_entropy_alpha['sl'] - self.delta_threshold_entropy_alpha, self.min_threshold_entropy_alpha['sl']])
+
+                # if self.counter['sl'] % (self.prior_weight * self.n_tasks['sl']) == 0:
+                # self.update_target_density()
+                # self.counter['sl'] = 0
                     
         else:
             log_pa_sT = torch.zeros(1).to(device)  
@@ -468,6 +537,36 @@ class Agent:
                     }            
             return metrics
     
+    def learn_concepts(self):
+        batch = self.memory['ql'].sample(self.batch_size['ql'])
+        batch = np.array(batch)
+        batch_size = batch.shape[0]
+
+        if batch_size > 0:
+            s_batch = torch.FloatTensor(batch[:,self.dim_excluded['init']:self.s_dim]).to(device)
+            r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1,1).to(device)  
+            ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['init']:2*self.s_dim+2]).to(device)
+            T_batch = batch[:,2*self.s_dim+3].astype('int')
+
+            q = self.critic1['ql'](s_batch)[np.arange(batch_size), T_batch, :]
+            A_batch_off = q.argmax(1)
+
+            T_batch_one_hot = torch.zeros(batch_size, self.n_tasks).to(device)
+            T_batch_one_hot[np.arange(batch_size), T_batch] = torch.ones(batch_size,).to(device)
+
+            A_predicted, PA_ST, log_PA_ST, S, PS_s, log_PS_s = self.classifier.sample_skills(s_batch, T_batch_one_hot)
+
+            HS_s = -(PS_s * log_PS_s).sum(1).mean()
+            
+            classifier_loss = -log_PA_ST[np.arange(batch_size), A_batch_off].mean()
+            self.classifier.optimizer.zero_grad()
+            classifier_loss.backward(retain_graph=True)
+            clip_grad_norm_(self.classifier.parameters(), self.clip_value)
+            self.classifier.optimizer.step()
+        
+            return classifier_loss.detach().item(), HS_s
+
+    
     def estimate_metrics(self, learning_type):
         with torch.no_grad():
             if learning_type == 'sl':
@@ -478,8 +577,9 @@ class Agent:
     
     def save(self, common_path, specific_path, learning_type):
         self.params['alpha'] = self.alpha
-        self.params['threshold_entropy_alpha'] = self.threshold_entropy_alpha
+        self.params['init_threshold_entropy_alpha'] = self.threshold_entropy_alpha['sl']
         self.params['init_epsilon'] = self.epsilon
+        # self.params['init_density_C'] = self.density.C
         
         pickle.dump(self.params,open(common_path+'/agent_params.p','wb'))
 
@@ -495,8 +595,13 @@ class Agent:
         torch.save(self.critic2[learning_type].state_dict(), specific_path+'_critic2_'+learning_type+'.pt')
         torch.save(self.v[learning_type].state_dict(), specific_path+'_v_'+learning_type+'.pt')
         torch.save(self.v_target[learning_type].state_dict(), specific_path+'_v_target_'+learning_type+'.pt')
+        # torch.save(self.RNDnet[learning_type].state_dict(), specific_path+'_RDN_'+learning_type+'.pt')
+        
         if learning_type == 'sl':
             torch.save(self.actor.state_dict(), specific_path+'_actor.pt')
+            # torch.save(self.density.state_dict(), specific_path+'_density.pt')
+            # pickle.dump(self.density,open(specific_path+'_density.p','wb'))
+            # pickle.dump(self.density_target,open(specific_path+'_density_target.p','wb'))
     
     def load(self, common_path, specific_path, learning_type, load_memory=True):
         if load_memory: 
@@ -508,18 +613,27 @@ class Agent:
                 pointer += len(data)
             self.memory[learning_type].pointer = pointer % self.memory[learning_type].capacity
 
+        # self.density = pickle.load(open(specific_path+'_density.p','rb')).to(device)
+        # self.density_target = pickle.load(open(specific_path+'_density_target.p','rb')).to(device)
+
         self.actor.load_state_dict(torch.load(specific_path+'_actor.pt'))
+        # self.density.load_state_dict(torch.load(specific_path+'_density.pt'))
         self.actor.eval()
+        # self.density.eval()
+        # self.density.C = self.params['init_density_C']
 
         self.critic1[learning_type].load_state_dict(torch.load(specific_path+'_critic1_'+learning_type+'.pt'))
         self.critic2[learning_type].load_state_dict(torch.load(specific_path+'_critic2_'+learning_type+'.pt'))
         self.v[learning_type].load_state_dict(torch.load(specific_path+'_v_'+learning_type+'.pt'))
         self.v_target[learning_type].load_state_dict(torch.load(specific_path+'_v_target_'+learning_type+'.pt'))
+        # self.RNDnet[learning_type].load_state_dict(torch.load(specific_path+'_RDN_'+learning_type+'.pt'))        
 
         self.critic1[learning_type].eval()
         self.critic2[learning_type].eval()
         self.v[learning_type].eval()
         self.v_target[learning_type].eval()
+        # self.RNDnet[learning_type].eval()
+        
 
 #----------------------------------------------
 #
@@ -542,8 +656,9 @@ class System:
                             'max_episode_steps': 1000,
                             'tr_steps_sl': 1000,
                             'tr_steps_ql': 300,
-                            'tr_epsd_sl': 1000,
-                            'tr_epsd_ql': 10000,
+                            'tr_epsd_sl': 1560,
+                            'tr_epsd_ql': 1130,
+                            'tr_epsd_cl': 1000,
                             'eval_epsd_sl': 2,
                             'eval_epsd_interval': 10,
                             'eval_epsd_ql': 2,
@@ -580,7 +695,8 @@ class System:
                         'init': self.params['init_steps'],
                         'tr': {
                                 'sl': self.params['tr_steps_sl'],
-                                'ql': self.params['tr_steps_ql']
+                                'ql': self.params['tr_steps_ql'],
+                                'cl': self.params['tr_steps_cl']
                             }
                     }
         self.epsds = {
@@ -611,7 +727,7 @@ class System:
         self.sa_dim = self.s_dim + self.a_dim
         self.sars_dim = self.s_dim*2 + self.a_dim + 1
         self.sarsd_dim = self.sars_dim + 1
-        self.t_dim = self.sarsd_dim + 1
+        self.t_dim = self.sarsd_dim + 2
         self.epsd_counter = 0
         self.task = 0
 
@@ -653,7 +769,7 @@ class System:
         event = np.empty(self.t_dim)
         state = self.get_obs()
         action = 2.0*np.random.rand(self.a_dim)-1.0
-        next_state, reward, done = self.envs[self.learning_type][self.task].step(action)[:3]  
+        next_state, reward, done, info = self.envs[self.learning_type][self.task].step(action)  
         done = done and self.reset_when_done
         
         event[:self.s_dim] = state
@@ -662,6 +778,7 @@ class System:
         event[self.sa_dim+1:self.sars_dim] = next_state
         event[self.sars_dim] = float(done)
         event[self.sarsd_dim] = self.task
+        event[self.sarsd_dim+1] = (info['angle']/(2*np.pi) * 8).astype(int)
 
         self.agent.memorize(event, self.learning_type)   
         return done
@@ -682,10 +799,11 @@ class System:
         for env_step in range(0, self.steps['env'][self.learning_type]):
             action = self.agent.act(state, skill, explore=explore if self.learning_type == 'sl' else False)
             scaled_action = scale_action(action, self.min_action, self.max_action).reshape(-1)
-            next_state, reward, done_step, _ = self.envs[self.learning_type][self.task].step(scaled_action)
+            next_state, reward, done_step, info = self.envs[self.learning_type][self.task].step(scaled_action)
             done = done or (done_step and self.reset_when_done)
             total_reward += reward
             final_state = np.copy(next_state)
+            angle_idx = (info['angle'] * 8).astype(int) if self.learning_type == 'sl' else 0
 
             event[:self.s_dim] = state
             event[self.s_dim:self.sa_dim] = action
@@ -693,8 +811,10 @@ class System:
             event[self.sa_dim+1:self.sars_dim] = next_state
             event[self.sars_dim] = float(done)
             event[self.sarsd_dim] = self.task
+            event[self.sarsd_dim+1] = angle_idx
         
             if remember and self.learning_type == 'sl': self.agent.memorize(event.copy(), self.learning_type)
+            # if remember and learn and self.learning_type == 'sl': self.agent.update_density(self.task, angle_idx)
             if done: break
             if env_step < self.steps['env'][self.learning_type]-1: state = np.copy(next_state)
         
@@ -719,7 +839,7 @@ class System:
 
         return total_reward, done, event
 
-    def train_agent(self, initialization=True, skill_learning=True, storing_path='', rewards=[], metrics=[], iter_0=0):
+    def train_agent(self, initialization=True, skill_learning=True, storing_path='', rewards=[], metrics=[], iter_0=0, q_learning=True, concept_learning=True):
         if len(storing_path) == 0: storing_path = self.params['storing_path']
 
         if initialization:
@@ -727,16 +847,27 @@ class System:
             specific_path = storing_path + '/' + str(0)
             self.save(storing_path, specific_path)
         
+        init_iter = iter_0
         if skill_learning:
-            self.train_agent_nets(storing_path=storing_path, rewards=rewards, metrics=metrics, iter_0=iter_0)
-
-        iter_0_ql = iter_0 if not self.learning_type == 'sl' else 0
+            self.train_agent_skills(storing_path=storing_path, rewards=rewards, metrics=metrics, iter_0=init_iter)
+            init_iter = 0
+        
         self.learning_type = 'ql'
         self.set_envs()
         self.agent.memory['sl'].forget()
-        self.train_agent_nets(storing_path=storing_path, iter_0=iter_0_ql)
+
+        if q_learning:
+            self.train_agent_skills(storing_path=storing_path, iter_0=init_iter)
+            init_iter = 0
+
+        self.learning_type = 'cl'
+        self.set_envs()
+        # self.agent.memory['ql'].forget()
+
+        if concept_learning:
+            self.train_agent_concepts()
     
-    def train_agent_nets(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
+    def train_agent_skills(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
         if self.render: self.envs[self.learning_type][self.task].render()         
 
         for epsd in range(0, self.epsds['tr'][self.learning_type]):
@@ -760,12 +891,32 @@ class System:
                 rewards.append(r)
                 np.savetxt(storing_path + '/metrics_'+self.learning_type+'.txt', np.array(metrics))               
                 
-            specific_path = storing_path + '/' + str(iter_)
-            self.save(storing_path, specific_path)
-            np.savetxt(storing_path + '/mean_rewards_'+self.learning_type+'.txt', np.array(rewards))
+                specific_path = storing_path + '/' + str(iter_)
+                self.save(storing_path, specific_path)
+                np.savetxt(storing_path + '/mean_rewards_'+self.learning_type+'.txt', np.array(rewards))
     
-    def train_agent_concepts(self):
-        pass
+    def train_agent_concepts(self, losses=[], entropies=[]):
+        stdscr = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+
+        for grad_step in range(0, self.steps['tr'][self.learning_type]):
+            loss, HS_s = self.agent.learn_concepts()
+            losses.append(loss)
+            entropies.append(HS_s)
+
+            stdscr.addstr(0, 0, "Iteration: {}".format(grad_step))
+            stdscr.addstr(1, 0, "Classification Loss: {}".format(loss))
+            stdscr.addstr(2, 0, "Entropy H(S|s): {}".format(HS_s))
+            stdscr.refresh()
+
+        curses.echo()
+        curses.nocbreak()
+        curses.endwin()
+        
+        self.save(common_path, specific_path)
+        np.savetxt(common_path + '/concept_training_losses.txt', np.array(losses))
+        np.savetxt(common_path + '/concept_training_entropies.txt', np.array(entropies))            
 
     @property
     def entropy_metric(self):
