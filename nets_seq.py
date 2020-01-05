@@ -2,6 +2,7 @@ import math
 import random
 import copy
 import numpy as np
+import heapq as hq
 
 import torch
 import torch.nn as nn
@@ -234,6 +235,68 @@ class SumTree:
         partition = np.linspace(0.0, self.root.value, num=batch_size)
         indices, codes = [], []
         return indices, codes
+
+class VanillaPriorityQueue: 
+    def __init__(self): 
+        self.queue = [] 
+  
+    def __str__(self): 
+        return ' '.join([str(i) for i in self.queue]) 
+  
+    @property
+    def empty(self): 
+        return len(self.queue) == 0 
+  
+    def insert(self, sample): 
+        self.queue.append(sample) 
+  
+    def remove(self): 
+        try: 
+            max = 0
+            for i in range(len(self.queue)): 
+                if self.queue[i][0] > self.queue[max][0]: 
+                    max = i 
+            item = self.queue[max] 
+            del self.queue[max] 
+            return item 
+        except IndexError: 
+            print() 
+            exit() 
+
+class HeapPriorityQueue:
+    def __init__(self, n_tasks):
+        self.n_tasks = n_tasks 
+        self.queue = []
+        self.directory = {str(i):{} for i in range(0, n_tasks)}        
+    
+    @property
+    def empty(self): 
+        return len(self.queue) == 0
+
+    def add(self, task, state, priority):
+        add = True
+        if str(state) in self.directory[str(task)]:
+            old_priority, _ = self.directory[str(task)][str(state)]
+            if priority < old_priority:
+                self.remove(task, state)
+            else:
+                add = False
+        if add:
+            entry = [priority, task, state]
+            self.directory[str(task)][str(state)] = entry
+            hq.heappush(self.queue, entry)
+    
+    def remove(self, task, state):
+        entry = self.directory[str(task)].pop(str(state))
+        entry[-1] = 'REMOVED'
+    
+    def pop(self):
+        while not self.empty:
+            priority, task, state = hq.heappop(self.queue)
+            if state is not 'REMOVED':
+                del self.directory[str(task)][str(state)]
+                return task, state
+        raise KeyError('pop from an empty priority queue')
 
 
 #-------------------------------------------------------------
@@ -715,10 +778,19 @@ class c_Net(nn.Module):
         self.lc1x1 = nn.Conv1d(nc4, n_concepts, 1, stride=1)
         self.lkv = parallel_Linear(n_concepts, v_dim4+k_dim4, 1)
         
-        self.bn1 = nn.BatchNorm1d(nc1)
-        self.bn2 = nn.BatchNorm1d(nc2)
-        self.bn3 = nn.BatchNorm1d(nc3)
-        self.bn4 = nn.BatchNorm1d(nc4)
+        self.bnv1 = nn.BatchNorm1d(nc1)
+        self.bnv2 = nn.BatchNorm1d(nc2)
+        self.bnv3 = nn.BatchNorm1d(nc3)
+        self.bnv4 = nn.BatchNorm1d(nc4)
+        self.bnv1g = nn.BatchNorm1d(nc1)
+        self.bnv2g = nn.BatchNorm1d(nc2)
+        self.bnv3g = nn.BatchNorm1d(nc3)
+        self.bnv4g = nn.BatchNorm1d(nc4)
+        self.bnk1 = nn.BatchNorm1d(nc1)
+        self.bnk2 = nn.BatchNorm1d(nc2)
+        self.bnk3 = nn.BatchNorm1d(nc3)
+        self.bnk4 = nn.BatchNorm1d(nc4)
+
         self.bn5 = nn.BatchNorm1d(n_concepts)
 
         self.map = m_Net(n_concepts, n_skills, n_tasks)
@@ -731,15 +803,15 @@ class c_Net(nn.Module):
         vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
         kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
 
-        v = torch.tanh(self.bn1(self.lv1e(vision_input))) * torch.sigmoid(self.bn1(self.lv1g(vision_input)))
-        v = torch.tanh(self.bn2(self.lv2e(v))) * torch.sigmoid(self.bn2(self.lv2g(v)))
-        v = torch.tanh(self.bn3(self.lv3e(v))) * torch.sigmoid(self.bn3(self.lv3g(v)))
-        v = torch.tanh(self.bn4(self.lv4e(v))) * torch.sigmoid(self.bn4(self.lv4g(v)))
+        v = torch.tanh(self.bnv1(self.lv1e(vision_input))) * torch.sigmoid(self.bnv1g(self.lv1g(vision_input)))
+        v = torch.tanh(self.bnv2(self.lv2e(v))) * torch.sigmoid(self.bnv2g(self.lv2g(v)))
+        v = torch.tanh(self.bnv3(self.lv3e(v))) * torch.sigmoid(self.bnv3g(self.lv3g(v)))
+        v = torch.tanh(self.bnv4(self.lv4e(v))) * torch.sigmoid(self.bnv4g(self.lv4g(v)))
         
-        k = F.relu(self.bn1(self.lk1(kinematic_input)))
-        k = F.relu(self.bn2(self.lk2(k)))
-        k = F.relu(self.bn3(self.lk3(k)))
-        k = torch.tanh(self.bn4(self.lk4(k)))
+        k = F.relu(self.bnk1(self.lk1(kinematic_input)))
+        k = F.relu(self.bnk2(self.lk2(k)))
+        k = F.relu(self.bnk3(self.lk3(k)))
+        k = torch.tanh(self.bnk4(self.lk4(k)))
 
         x = torch.cat([k,v],2)
         x = F.relu(self.bn5(self.lc1x1(x)))
@@ -760,7 +832,7 @@ class c_Net(nn.Module):
 
     def sample_skill(self, s, task, explore=True):
         S, PS = self.sample_concept(s, explore=explore)
-        PA_ST = self.map(S, task)
+        PA_ST = self.map(PS, task)
         if explore:
             A = Categorical(probs=PA_ST).sample().item()
         else:            
@@ -781,7 +853,7 @@ class c_Net(nn.Module):
 
     def sample_skills(self, s, task, explore=True):
         S, PS_s, log_PS_s = self.sample_concepts(s, explore=explore)
-        PA_ST = self.map(S, task)
+        PA_ST = self.map(PS_s, task)
         if explore:
             A = Categorical(probs=PA_ST).sample().cpu()
         else:            
