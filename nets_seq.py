@@ -366,13 +366,18 @@ class m_Net(nn.Module):
         self.l2 = nn.Linear(256, 256)
         self.l3 = nn.Linear(256, n_skills)  
 
+        self.bn1 = nn.BatchNorm1d(n_concepts+n_tasks) 
+        self.bn2 = nn.BatchNorm1d(256) 
+        self.bn3 = nn.BatchNorm1d(256) 
+
         self.apply(weights_init_) 
         
     def forward(self, S,T):
         x = torch.cat([S, T], 1)
-        x = F.relu(self.l1(x))
-        x = F.relu(self.l2(x))
-        x = torch.exp(self.l3(x))
+        x = F.relu(self.l1(self.bn1(x)))
+        x = F.relu(self.l2(self.bn2(x)))
+        x = self.l3(self.bn3(x))
+        x = torch.exp(x-x.max(1, keepdim=True)[0])
         PA_ST = x / x.sum(1, keepdim=True)
         return(PA_ST)
 
@@ -727,71 +732,73 @@ class multichannel_Linear(nn.Module):
 #
 #-------------------------------------------------------------
 class c_Net(nn.Module):
-    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=3):
+    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=3, tau=1.0):
         super().__init__()  
         self.n_tasks = n_tasks
         self.s_dim = s_dim   
         self.n_concepts = n_concepts
         self.vision_channels = vision_channels
         self.vision_dim = vision_dim
-        self.kinematic_dim = s_dim - vision_dim*vision_channels     
+        self.kinematic_dim = s_dim - vision_dim*vision_channels  
+        self.tau = tau   
         
         nc1 = vision_channels * 2
         nc2 = vision_channels * 4
         nc3 = vision_channels * 8
-        nc4 = vision_channels * 16
+        # nc4 = vision_channels * 16
 
         kernel_size1 = 4
         kernel_size2 = 4
         kernel_size3 = 3
-        kernel_size4 = 3
+        # kernel_size4 = 3
 
         dilation1 = 1
         dilation2 = 2
         dilation3 = 1
-        dilation4 = 2
+        # dilation4 = 2
         
-        k_dim1 = 24
-        k_dim2 = 20
-        k_dim3 = 15
-        k_dim4 = 10
+        k_dim1 = 20
+        k_dim2 = 15
+        k_dim3 = 10
+        # k_dim4 = 10
 
         v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
         v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
         v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
-        v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
+        # v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
         
         self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
         self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
         self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
+        # self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
         self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
         self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
         self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
+        # self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
 
         self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
         self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
         self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
-        self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
+        # self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
 
-        self.lc1x1 = nn.Conv1d(nc4, n_concepts, 1, stride=1)
-        self.lkv = parallel_Linear(n_concepts, v_dim4+k_dim4, 1)
+        self.lc1x1 = nn.Conv1d(nc3, n_concepts, 1, stride=1)
+        self.lkv = parallel_Linear(n_concepts, v_dim3+k_dim3, 1)
+        self.lkv2 = nn.Linear(n_concepts, n_concepts)
         
-        self.bnv1 = nn.BatchNorm1d(nc1)
-        self.bnv2 = nn.BatchNorm1d(nc2)
-        self.bnv3 = nn.BatchNorm1d(nc3)
-        self.bnv4 = nn.BatchNorm1d(nc4)
-        self.bnv1g = nn.BatchNorm1d(nc1)
-        self.bnv2g = nn.BatchNorm1d(nc2)
-        self.bnv3g = nn.BatchNorm1d(nc3)
-        self.bnv4g = nn.BatchNorm1d(nc4)
-        self.bnk1 = nn.BatchNorm1d(nc1)
-        self.bnk2 = nn.BatchNorm1d(nc2)
-        self.bnk3 = nn.BatchNorm1d(nc3)
-        self.bnk4 = nn.BatchNorm1d(nc4)
+        self.bnv1 = nn.BatchNorm1d(vision_channels)
+        self.bnv2 = nn.BatchNorm1d(nc1)
+        self.bnv3 = nn.BatchNorm1d(nc2)
+        # self.bnv4 = nn.BatchNorm1d(nc3)
+        self.bnv1g = nn.BatchNorm1d(vision_channels)
+        self.bnv2g = nn.BatchNorm1d(nc1)
+        self.bnv3g = nn.BatchNorm1d(nc2)
+        # self.bnv4g = nn.BatchNorm1d(nc3)
+        self.bnk1 = nn.BatchNorm1d(self.kinematic_dim)
+        self.bnk2 = nn.BatchNorm1d(nc1)
+        self.bnk3 = nn.BatchNorm1d(nc2)
+        # self.bnk4 = nn.BatchNorm1d(nc3)
 
-        self.bn5 = nn.BatchNorm1d(n_concepts)
+        self.bn4 = nn.BatchNorm1d(nc3)
 
         self.map = m_Net(n_concepts, n_skills, n_tasks)
                         
@@ -801,22 +808,25 @@ class c_Net(nn.Module):
 
     def forward(self, s):
         vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
-        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)].unsqueeze(1)
+        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)]
 
-        v = torch.tanh(self.bnv1(self.lv1e(vision_input))) * torch.sigmoid(self.bnv1g(self.lv1g(vision_input)))
-        v = torch.tanh(self.bnv2(self.lv2e(v))) * torch.sigmoid(self.bnv2g(self.lv2g(v)))
-        v = torch.tanh(self.bnv3(self.lv3e(v))) * torch.sigmoid(self.bnv3g(self.lv3g(v)))
-        v = torch.tanh(self.bnv4(self.lv4e(v))) * torch.sigmoid(self.bnv4g(self.lv4g(v)))
+        v = torch.tanh(self.lv1e(self.bnv1(vision_input))) * torch.sigmoid(self.lv1g(self.bnv1g(vision_input)))
+        v = torch.tanh(self.lv2e(self.bnv2(v))) * torch.sigmoid(self.lv2g(self.bnv2g(v)))
+        v = torch.tanh(self.lv3e(self.bnv3(v))) * torch.sigmoid(self.lv3g(self.bnv3g(v)))
+        # v = torch.tanh(self.lv4e(self.bnv4(v))) * torch.sigmoid(self.lv4g(self.bnv4g(v)))
         
-        k = F.relu(self.bnk1(self.lk1(kinematic_input)))
-        k = F.relu(self.bnk2(self.lk2(k)))
-        k = F.relu(self.bnk3(self.lk3(k)))
-        k = torch.tanh(self.bnk4(self.lk4(k)))
+        k = F.relu(self.lk1(self.bnk1(kinematic_input).unsqueeze(1)))
+        k = F.relu(self.lk2(self.bnk2(k)))
+        k = F.relu(self.lk3(self.bnk3(k)))
+        # k = torch.tanh(self.lk4(self.bnk4(k)))
 
         x = torch.cat([k,v],2)
-        x = F.relu(self.bn5(self.lc1x1(x)))
-        x = torch.exp(self.lkv(x).squeeze(2))
+        x = F.relu(self.lc1x1(self.bn4(x)))
+        x = torch.sigmoid(self.lkv(x).squeeze(2))
+        x = self.lkv2(x)
+        x = torch.exp(x - x.max(1, keepdim=True)[0])
         PS_s = x / x.sum(1, keepdim=True)
+        assert torch.all(PS_s == PS_s), 'EXPLOSION PS!'
 
         return PS_s
     
@@ -830,9 +840,23 @@ class c_Net(nn.Module):
             S = Categorical(probs=tie_breaking_dist).sample().item()            
         return S, PS_s
 
+    def sample_differentiable_concepts(self, PS):
+        u = torch.rand_like(PS)
+        g = -torch.log((-torch.log(u+1e-10)).clamp(1e-10,1.0))
+        e = g + torch.log(PS+1e-10)
+        assert torch.all(e == e), 'EXPLOSION e!'
+        z = torch.zeros_like(PS)
+        z[np.arange(0,PS.shape[0]), e.argmax(1)] = torch.ones(PS.shape[0]).to(device)
+        y = torch.exp((e-e.max(1, keepdim=True)[0])/self.tau)
+        y = y / y.sum(1, keepdim=True)
+        assert torch.all(y == y), 'EXPLOSION y!'
+        z = z + y - y.detach()
+        return z
+
     def sample_skill(self, s, task, explore=True):
         S, PS = self.sample_concept(s, explore=explore)
-        PA_ST = self.map(PS, task)
+        z = self.sample_differentiable_concepts(PS)
+        PA_ST = self.map(z, task)
         if explore:
             A = Categorical(probs=PA_ST).sample().item()
         else:            
@@ -853,14 +877,17 @@ class c_Net(nn.Module):
 
     def sample_skills(self, s, task, explore=True):
         S, PS_s, log_PS_s = self.sample_concepts(s, explore=explore)
-        PA_ST = self.map(PS_s, task)
+        z = self.sample_differentiable_concepts(PS_s)
+        assert torch.all(z == z), 'EXPLOSION z!'
+        PA_ST = self.map(z, task)
+        assert torch.all(PA_ST == PA_ST), 'EXPLOSION map!'
         if explore:
             A = Categorical(probs=PA_ST).sample().cpu()
         else:            
             tie_breaking_dist = torch.isclose(PA_ST, PA_ST.max(1, keepdim=True)[0]).float()
             tie_breaking_dist /= tie_breaking_dist.sum()
             A = Categorical(probs=tie_breaking_dist).sample().cpu()
-        return A, PA_ST, torch.log(PA_ST+1e-12), S, PS_s, log_PS_s
+        return A, PA_ST, torch.log(PA_ST+1e-12), S, PS_s, log_PS_s, z
     
 class s_Net(nn.Module):
     def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, lr=3e-4, hidden_dim=256, 
