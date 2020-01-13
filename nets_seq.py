@@ -7,6 +7,7 @@ import heapq as hq
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.distributions import Normal, Categorical
@@ -26,7 +27,7 @@ def gaussian_likelihood(x, mu, log_std, EPS):
     return likelihood
 
 def weights_init_(m):
-    if isinstance(m, nn.Linear) or isinstance(m, parallel_Linear) or isinstance(m, parallel_Linear_simple):
+    if isinstance(m, nn.Linear) or isinstance(m, parallel_Linear) or isinstance(m, parallel_Linear_simple) or isinstance(m, Linear):
         torch.nn.init.xavier_uniform_(m.weight, gain=1)
         torch.nn.init.constant_(m.bias, 0)
 
@@ -267,7 +268,7 @@ class HeapPriorityQueue:
     def __init__(self, n_tasks):
         self.n_tasks = n_tasks 
         self.queue = []
-        self.directory = {str(i):{} for i in range(0, n_tasks)}        
+        self.directory = {str(i):{} for i in range(0, n_tasks)}                
     
     @property
     def empty(self): 
@@ -276,7 +277,7 @@ class HeapPriorityQueue:
     def add(self, task, state, priority):
         add = True
         if str(state) in self.directory[str(task)]:
-            old_priority, _ = self.directory[str(task)][str(state)]
+            old_priority, _, _ = self.directory[str(task)][str(state)]
             if priority < old_priority:
                 self.remove(task, state)
             else:
@@ -288,15 +289,16 @@ class HeapPriorityQueue:
     
     def remove(self, task, state):
         entry = self.directory[str(task)].pop(str(state))
-        entry[-1] = 'REMOVED'
+        entry[-1] = -1
     
     def pop(self):
         while not self.empty:
             priority, task, state = hq.heappop(self.queue)
-            if state is not 'REMOVED':
+            if state != -1:
                 del self.directory[str(task)][str(state)]
                 return task, state
-        raise KeyError('pop from an empty priority queue')
+        return 0
+        #raise KeyError('pop from an empty priority queue')
 
 
 #-------------------------------------------------------------
@@ -361,25 +363,96 @@ class q_Net(nn.Module):
 
 class m_Net(nn.Module):
     def __init__(self, n_concepts, n_skills, n_tasks, lr=3e-4):
-        super().__init__()        
-        self.l1 = nn.Linear(n_concepts+n_tasks, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, n_skills)  
-
-        self.bn1 = nn.BatchNorm1d(n_concepts+n_tasks) 
-        self.bn2 = nn.BatchNorm1d(256) 
-        self.bn3 = nn.BatchNorm1d(256) 
-
-        self.apply(weights_init_) 
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.n_skills = n_skills        
+        self.l1 = parallel_Linear_simple(n_tasks, n_concepts, 64)
+        self.l2 = parallel_Linear(n_tasks, 64, 64)
+        self.l3 = parallel_Linear(n_tasks, 64, n_skills)
+        self.l4 = nn.Softmax(dim=2)
         
-    def forward(self, S,T):
-        x = torch.cat([S, T], 1)
-        x = F.relu(self.l1(self.bn1(x)))
-        x = F.relu(self.l2(self.bn2(x)))
-        x = self.l3(self.bn3(x))
-        x = torch.exp(x-x.max(1, keepdim=True)[0])
-        PA_ST = x / x.sum(1, keepdim=True)
-        return(PA_ST)
+        # self.bn1 = nn.BatchNorm1d(n_concepts+n_tasks) 
+        # self.bn2 = nn.BatchNorm1d(256) 
+        # self.bn3 = nn.BatchNorm1d(256) 
+
+        self.apply(weights_init_)
+        self.optimizer = optim.Adam(self.parameters(), lr=lr) 
+        
+    def forward(self, S_one_hot, vars_=None):
+        # x = torch.cat([S, T], 1)
+        # x = F.relu(self.l1(self.bn1(x)))
+        # x = F.relu(self.l2(self.bn2(x)))
+        # x = self.l3(self.bn3(x))
+        if vars_ is None:
+            x = F.relu(self.l1(S_one_hot))
+            x = F.relu(self.l2(x))
+            x = (self.l3(x)).clamp(-10, 2) #.view(-1, self.n_tasks, self.n_skills)
+        else:
+            x = F.relu(self.l1(S_one_hot, vars_=vars_[0:2]))
+            x = F.relu(self.l2(x, vars_=vars_[2:4]))
+            x = (self.l3(x, vars_=vars_[4:])).clamp(-10, 2)
+
+        PA_ST = self.l4(x)
+        log_PA_ST = x - torch.logsumexp(x, dim=2, keepdim=True)
+        return PA_ST, log_PA_ST
+    
+class dm_Net(nn.Module):
+    def __init__(self, n_concepts, n_skills, n_tasks, lr=3e-4):
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.n_skills = n_skills        
+        self.l1 = parallel_Linear_simple(n_tasks, n_concepts+n_skills, 64)
+        self.l2 = parallel_Linear(n_tasks, 64, 64)
+        self.l3 = parallel_Linear(n_tasks, 64, n_concepts)
+        self.l4 = nn.Softmax(dim=2)
+
+        self.apply(weights_init_)
+        self.optimizer = optim.Adam(self.parameters(), lr=lr) 
+        
+    def forward(self, S_one_hot, A_one_hot, vars_=None):
+        x = torch.cat([S_one_hot, A_one_hot], 1)
+
+        if vars_ is None:            
+            x = F.relu(self.l1(x))
+            x = F.relu(self.l2(x))
+            x = (self.l3(x)).clamp(-10, 2)
+        else:
+            x = F.relu(self.l1(x, vars_=vars_[0:2]))
+            x = F.relu(self.l2(x, vars_=vars_[2:4]))
+            x = (self.l3(x, vars_=vars_[4:])).clamp(-10, 2)
+
+        PnS_SAT = self.l4(x)
+        log_PnS_SAT = x - torch.logsumexp(x, dim=2, keepdim=True)
+        return PnS_SAT, log_PnS_SAT
+
+class cl_Net(nn.Module):
+    def __init__(self, n_concepts, s_dim, n_tasks, lr=3e-4):
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.s_dim = s_dim   
+        self.n_concepts = n_concepts       
+        
+        self.l1 = Linear(s_dim, 256)
+        self.l2 = Linear(256, 256)
+        self.l3 = Linear(256, n_concepts)
+        self.l4 = nn.Softmax(dim=1)
+        
+        self.apply(weights_init_)
+        self.optimizer = optim.Adam(self.parameters(), lr=lr) 
+        
+    def forward(self, s, vars_=None):   
+        if vars_ is None:         
+            x = F.relu(self.l1(s))
+            x = F.relu(self.l2(x))
+            x = (self.l3(x)).clamp(-10, 2)
+        else:
+            x = F.relu(self.l1(s, vars_=vars_[0:2]))
+            x = F.relu(self.l2(x, vars_=vars_[2:4]))
+            x = (self.l3(x, vars_=vars_[4:])).clamp(-10, 2)
+
+        PS_s = self.l4(x)
+        log_PS_s = x - torch.logsumexp(x, dim=1, keepdim=True)
+        return PS_s, log_PS_s
 
 class DQN(nn.Module):
     def __init__(self, s_dim, n_skills, n_tasks, vision_dim=20, vision_channels=3, lr=3e-4):
@@ -643,6 +716,72 @@ class d_Net(nn.Module):
 #    Custom modules
 #
 #-------------------------------------------------------------
+class Linear(nn.Module):
+    r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
+
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        bias: If set to ``False``, the layer will not learn an additive bias.
+            Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, *, H_{in})` where :math:`*` means any number of
+          additional dimensions and :math:`H_{in} = \text{in\_features}`
+        - Output: :math:`(N, *, H_{out})` where all but the last dimension
+          are the same shape as the input and :math:`H_{out} = \text{out\_features}`.
+
+    Attributes:
+        weight: the learnable weights of the module of shape
+            :math:`(\text{out\_features}, \text{in\_features})`. The values are
+            initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`, where
+            :math:`k = \frac{1}{\text{in\_features}}`
+        bias:   the learnable bias of the module of shape :math:`(\text{out\_features})`.
+                If :attr:`bias` is ``True``, the values are initialized from
+                :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})` where
+                :math:`k = \frac{1}{\text{in\_features}}`
+
+    Examples::
+
+        >>> m = nn.Linear(20, 30)
+        >>> input = torch.randn(128, 20)
+        >>> output = m(input)
+        >>> print(output.size())
+        torch.Size([128, 30])
+    """
+    __constants__ = ['bias', 'in_features', 'out_features']
+
+    def __init__(self, in_features, out_features, bias=True):
+        super(Linear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input, vars_=None):
+        if vars_ is None:
+            weight = self.weight
+            bias = self.bias
+        else:
+            weight, bias = vars_
+        return F.linear(input, weight, bias)
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, bias={}'.format(
+            self.in_features, self.out_features, self.bias is not None
+        )
+
 class parallel_Linear(nn.Module):
     def __init__(self, n_layers, in_features, out_features):
         super().__init__()
@@ -659,8 +798,13 @@ class parallel_Linear(nn.Module):
         bound = 1 / math.sqrt(fan_in)
         nn.init.uniform_(self.bias, -bound, bound)
 
-    def forward(self, input):
-        return torch.einsum('ijk,jlk->ijl', input, self.weight) + self.bias.unsqueeze(0)
+    def forward(self, input, vars_=None):
+        if vars_ is None:
+            weight = self.weight
+            bias = self.bias
+        else:
+            weight, bias = vars_
+        return torch.einsum('ijk,jlk->ijl', input, weight) + bias.unsqueeze(0)
 
     def conditional(self, input, given):
         return torch.einsum('ik,lk->il', input, self.weight[given,:,:]) + self.bias[given,:].unsqueeze(0) 
@@ -692,8 +836,13 @@ class parallel_Linear_simple(nn.Module):
         bound = 1 / math.sqrt(fan_in)
         nn.init.uniform_(self.bias, -bound, bound)
 
-    def forward(self, input):
-        return torch.einsum('ik,jlk->ijl', input, self.weight) + self.bias.unsqueeze(0) 
+    def forward(self, input, vars_=None):
+        if vars_ is None:
+            weight = self.weight
+            bias = self.bias
+        else:
+            weight, bias = vars_
+        return torch.einsum('ik,jlk->ijl', input, weight) + bias.unsqueeze(0) 
 
     def single_output(self, input, label):
         weight = self.weight.data[label,:,:].view(self.out_features, self.in_features)
@@ -732,106 +881,32 @@ class multichannel_Linear(nn.Module):
 #
 #-------------------------------------------------------------
 class c_Net(nn.Module):
-    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=3, tau=1.0):
+    def __init__(self, n_concepts, s_dim, n_skills, n_tasks=1, lr=3e-4, vision_dim=20, vision_channels=3, tau=10.0, lr_sch_steps=5000, gamma=0.6):
         super().__init__()  
         self.n_tasks = n_tasks
         self.s_dim = s_dim   
         self.n_concepts = n_concepts
-        self.vision_channels = vision_channels
-        self.vision_dim = vision_dim
-        self.kinematic_dim = s_dim - vision_dim*vision_channels  
         self.tau = tau   
         
-        nc1 = vision_channels * 2
-        nc2 = vision_channels * 4
-        nc3 = vision_channels * 8
-        # nc4 = vision_channels * 16
-
-        kernel_size1 = 4
-        kernel_size2 = 4
-        kernel_size3 = 3
-        # kernel_size4 = 3
-
-        dilation1 = 1
-        dilation2 = 2
-        dilation3 = 1
-        # dilation4 = 2
-        
-        k_dim1 = 20
-        k_dim2 = 15
-        k_dim3 = 10
-        # k_dim4 = 10
-
-        v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
-        v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
-        v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
-        # v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
-        
-        self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
-        self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
-        self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        # self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
-        self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
-        self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
-        self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
-        # self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
-
-        self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
-        self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
-        self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
-        # self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
-
-        self.lc1x1 = nn.Conv1d(nc3, n_concepts, 1, stride=1)
-        self.lkv = parallel_Linear(n_concepts, v_dim3+k_dim3, 1)
-        self.lkv2 = nn.Linear(n_concepts, n_concepts)
-        
-        self.bnv1 = nn.BatchNorm1d(vision_channels)
-        self.bnv2 = nn.BatchNorm1d(nc1)
-        self.bnv3 = nn.BatchNorm1d(nc2)
-        # self.bnv4 = nn.BatchNorm1d(nc3)
-        self.bnv1g = nn.BatchNorm1d(vision_channels)
-        self.bnv2g = nn.BatchNorm1d(nc1)
-        self.bnv3g = nn.BatchNorm1d(nc2)
-        # self.bnv4g = nn.BatchNorm1d(nc3)
-        self.bnk1 = nn.BatchNorm1d(self.kinematic_dim)
-        self.bnk2 = nn.BatchNorm1d(nc1)
-        self.bnk3 = nn.BatchNorm1d(nc2)
-        # self.bnk4 = nn.BatchNorm1d(nc3)
-
-        self.bn4 = nn.BatchNorm1d(nc3)
-
+        self.classifier = cl_Net(n_concepts, s_dim, n_tasks)
         self.map = m_Net(n_concepts, n_skills, n_tasks)
-                        
+        self.model = dm_Net(n_concepts, n_skills, n_tasks)
+        self.ly = nn.Softmax(dim=1)
+
         self.apply(weights_init_)
+        self.optimizer = optim.SGD(self.parameters(), lr=lr)
+        self.lr_scheduler = lr_scheduler.StepLR(self.optimizer, step_size=lr_sch_steps, gamma=gamma)
 
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)        
-
-    def forward(self, s):
-        vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
-        kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)]
-
-        v = torch.tanh(self.lv1e(self.bnv1(vision_input))) * torch.sigmoid(self.lv1g(self.bnv1g(vision_input)))
-        v = torch.tanh(self.lv2e(self.bnv2(v))) * torch.sigmoid(self.lv2g(self.bnv2g(v)))
-        v = torch.tanh(self.lv3e(self.bnv3(v))) * torch.sigmoid(self.lv3g(self.bnv3g(v)))
-        # v = torch.tanh(self.lv4e(self.bnv4(v))) * torch.sigmoid(self.lv4g(self.bnv4g(v)))
-        
-        k = F.relu(self.lk1(self.bnk1(kinematic_input).unsqueeze(1)))
-        k = F.relu(self.lk2(self.bnk2(k)))
-        k = F.relu(self.lk3(self.bnk3(k)))
-        # k = torch.tanh(self.lk4(self.bnk4(k)))
-
-        x = torch.cat([k,v],2)
-        x = F.relu(self.lc1x1(self.bn4(x)))
-        x = torch.sigmoid(self.lkv(x).squeeze(2))
-        x = self.lkv2(x)
-        x = torch.exp(x - x.max(1, keepdim=True)[0])
-        PS_s = x / x.sum(1, keepdim=True)
-        assert torch.all(PS_s == PS_s), 'EXPLOSION PS!'
-
-        return PS_s
+    # def forward(self, s):   
+    #     x = F.relu(self.l1(s))
+    #     x = F.relu(self.l2(x))
+    #     x = self.l3(x)
+    #     PS_s = self.l4(x)
+    #     log_PS_s = x - torch.logsumexp(x, dim=1, keepdim=True)
+    #     return PS_s, log_PS_s
     
     def sample_concept(self, s, explore=True):
-        PS_s = self(s.view(1,-1)).view(-1)
+        PS_s = self.classifier(s.view(1,-1))[0].view(-1)
         if explore:
             S = Categorical(probs=PS_s).sample().item()
         else:            
@@ -840,23 +915,22 @@ class c_Net(nn.Module):
             S = Categorical(probs=tie_breaking_dist).sample().item()            
         return S, PS_s
 
-    def sample_differentiable_concepts(self, PS):
-        u = torch.rand_like(PS)
-        g = -torch.log((-torch.log(u+1e-10)).clamp(1e-10,1.0))
-        e = g + torch.log(PS+1e-10)
-        assert torch.all(e == e), 'EXPLOSION e!'
-        z = torch.zeros_like(PS)
-        z[np.arange(0,PS.shape[0]), e.argmax(1)] = torch.ones(PS.shape[0]).to(device)
-        y = torch.exp((e-e.max(1, keepdim=True)[0])/self.tau)
-        y = y / y.sum(1, keepdim=True)
-        assert torch.all(y == y), 'EXPLOSION y!'
+    def sample_differentiable_concepts(self, log_PS_s):
+        u = torch.rand_like(log_PS_s)
+        g = -torch.log(-torch.log(u+1e-10)+1e-10)
+        e = g + log_PS_s
+        # assert torch.all(e == e), 'EXPLOSION e!'
+        z = torch.zeros_like(log_PS_s)
+        z[np.arange(0,log_PS_s.shape[0]), e.argmax(1)] = torch.ones(log_PS_s.shape[0]).to(device)
+        y = self.ly(e/self.tau)
+        # assert torch.all(y == y), 'EXPLOSION y!'
         z = z + y - y.detach()
         return z
 
     def sample_skill(self, s, task, explore=True):
         S, PS = self.sample_concept(s, explore=explore)
         z = self.sample_differentiable_concepts(PS)
-        PA_ST = self.map(z, task)
+        PA_ST, _ = self.map(z)[:,task,:]
         if explore:
             A = Categorical(probs=PA_ST).sample().item()
         else:            
@@ -865,29 +939,158 @@ class c_Net(nn.Module):
             A = Categorical(probs=tie_breaking_dist).sample().item()
         return A, PA_ST, S, PS
     
-    def sample_concepts(self, s, explore=True):
-        PS_s = self(s)
+    def sample_concepts(self, s, explore=True, vars_=None):
+        PS_s, log_PS_s = self.classifier(s, vars_=vars_)
         if explore:
             S = Categorical(probs=PS_s).sample().cpu()
         else:            
             tie_breaking_dist = torch.isclose(PS_s, PS_s.max(1, keepdim=True)[0]).float()
             tie_breaking_dist /= tie_breaking_dist.sum()
             S = Categorical(probs=tie_breaking_dist).sample().cpu()            
-        return S, PS_s, torch.log(PS_s+1e-12)  
+        return S, PS_s, log_PS_s  
 
-    def sample_skills(self, s, task, explore=True):
-        S, PS_s, log_PS_s = self.sample_concepts(s, explore=explore)
-        z = self.sample_differentiable_concepts(PS_s)
-        assert torch.all(z == z), 'EXPLOSION z!'
-        PA_ST = self.map(z, task)
-        assert torch.all(PA_ST == PA_ST), 'EXPLOSION map!'
-        if explore:
-            A = Categorical(probs=PA_ST).sample().cpu()
-        else:            
-            tie_breaking_dist = torch.isclose(PA_ST, PA_ST.max(1, keepdim=True)[0]).float()
-            tie_breaking_dist /= tie_breaking_dist.sum()
-            A = Categorical(probs=tie_breaking_dist).sample().cpu()
-        return A, PA_ST, torch.log(PA_ST+1e-12), S, PS_s, log_PS_s, z
+    def forward(self, s, A_one_hot, active_model=True, active_map=True, vars_cla=None, vars_map=None, vars_mod=None):
+        PS_s, log_PS_s = self.classifier(s, vars_=vars_cla)
+        z = self.sample_differentiable_concepts(log_PS_s)
+        if active_map: PA_ST, log_PA_ST = self.map(z, vars_=vars_map)
+        if active_model: PnS_SAT, log_PnS_SAT = self.model(z, A_one_hot, vars_=vars_mod)
+        S = z.detach().argmax(1)
+        if active_model and active_map:
+            return S, PS_s, log_PS_s, PA_ST, log_PA_ST, PnS_SAT, log_PnS_SAT
+        elif active_map:
+            return S, PS_s, log_PS_s, PA_ST, log_PA_ST
+        elif active_model:
+            return S, PS_s, log_PS_s, PnS_SAT, log_PnS_SAT
+        else:
+            return S, PS_s, log_PS_s
+   
+    # def sample_skills(self, s, explore=True):
+    #     S, PS_s, log_PS_s = self.sample_concepts(s, explore=explore)
+    #     z = self.sample_differentiable_concepts(log_PS_s)
+    #     # assert torch.all(z == z), 'EXPLOSION z!'
+    #     PA_ST, log_PA_ST = self.map(z)
+    #     # assert torch.all(PA_ST == PA_ST), 'EXPLOSION map!'
+    #     # if explore:
+    #     #     A = Categorical(probs=PA_ST).sample().cpu()
+    #     # else:            
+    #     #     tie_breaking_dist = torch.isclose(PA_ST, PA_ST.max(2, keepdim=True)[0]).float()
+    #     #     tie_breaking_dist /= tie_breaking_dist.sum()
+    #     #     A = Categorical(probs=tie_breaking_dist).sample().cpu()
+    #     return PA_ST, log_PA_ST, S, PS_s, log_PS_s, z
+
+    # self.n_tasks = n_tasks
+        # self.s_dim = s_dim   
+        # self.n_concepts = n_concepts
+        # self.vision_channels = vision_channels
+        # self.vision_dim = vision_dim
+        # self.kinematic_dim = s_dim - vision_dim*vision_channels  
+        # self.tau = tau   
+        
+    #     nc1 = vision_channels * 2
+    #     nc2 = vision_channels * 4
+    #     nc3 = vision_channels * 8
+    #     # nc4 = vision_channels * 16
+
+    #     kernel_size1 = 4
+    #     kernel_size2 = 4
+    #     kernel_size3 = 3
+    #     # kernel_size4 = 3
+
+    #     dilation1 = 1
+    #     dilation2 = 2
+    #     dilation3 = 1
+    #     # dilation4 = 2
+        
+    #     k_dim1 = 256
+    #     # k_dim2 = 256
+    #     # k_dim3 = 10
+    #     # k_dim4 = 10
+
+    #     v_dim1 = int((vision_dim - dilation1*(kernel_size1-1) - 1)/1 + 1)
+    #     v_dim2 = int((v_dim1 - dilation2*(kernel_size2-1) - 1)/1 + 1)
+    #     v_dim3 = int((v_dim2 - dilation3*(kernel_size3-1) - 1)/1 + 1)
+    #     # v_dim4 = int((v_dim3 - dilation4*(kernel_size4-1) - 1)/1 + 1)
+        
+    #     self.lv1e = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+    #     self.lv2e = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+    #     self.lv3e = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+    #     # self.lv4e = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)
+    #     self.lv1g = nn.Conv1d(vision_channels, nc1, kernel_size1, dilation=dilation1)
+    #     self.lv2g = nn.Conv1d(nc1, nc2, kernel_size2, dilation=dilation2)
+    #     self.lv3g = nn.Conv1d(nc2, nc3, kernel_size3, dilation=dilation3)
+    #     # self.lv4g = nn.Conv1d(nc3, nc4, kernel_size4, dilation=dilation4)        
+
+    #     self.lk1 = nn.Linear(self.kinematic_dim, k_dim1)
+    #     # self.lk2 = nn.Linear(k_dim1, k_dim2)
+    #     # self.lk1 = multichannel_Linear(1, nc1, self.kinematic_dim, k_dim1)
+    #     # self.lk2 = multichannel_Linear(nc1, nc2, k_dim1, k_dim2)
+    #     # self.lk3 = multichannel_Linear(nc2, nc3, k_dim2, k_dim3)
+    #     # self.lk4 = multichannel_Linear(nc3, nc4, k_dim3, k_dim4)
+
+    #     self.lc1x1 = nn.Conv1d(nc3, 1, 1, stride=1)
+    #     self.lkv = nn.Linear(v_dim3+k_dim1, 256)
+    #     self.lkv2 = nn.Linear(256, n_concepts)
+    #     # self.lkv = parallel_Linear(n_concepts, v_dim3+k_dim1, 1)
+    #     # self.lkv2 = nn.Linear(n_concepts, n_concepts)
+        
+    #     # self.bnv1 = nn.BatchNorm1d(vision_channels)
+    #     # self.bnv2 = nn.BatchNorm1d(nc1)
+    #     # self.bnv3 = nn.BatchNorm1d(nc2)
+    #     # # self.bnv4 = nn.BatchNorm1d(nc3)
+    #     # self.bnv1g = nn.BatchNorm1d(vision_channels)
+    #     # self.bnv2g = nn.BatchNorm1d(nc1)
+    #     # self.bnv3g = nn.BatchNorm1d(nc2)
+    #     # # self.bnv4g = nn.BatchNorm1d(nc3)
+    #     # self.bnk1 = nn.BatchNorm1d(self.kinematic_dim)
+    #     # self.bnk2 = nn.BatchNorm1d(nc1)
+    #     # self.bnk3 = nn.BatchNorm1d(nc2)
+    #     # # self.bnk4 = nn.BatchNorm1d(nc3)
+
+    #     # self.bn4 = nn.BatchNorm1d(nc3)
+
+    #     self.map = m_Net(n_concepts, n_skills, n_tasks)
+                        
+    #     self.apply(weights_init_)
+
+    #     self.optimizer = optim.Adam(self.parameters(), lr=lr)        
+
+    # def forward(self, s):
+    #     vision_input = s[:,-int(self.vision_dim*self.vision_channels):].view(s.size(0),self.vision_channels,self.vision_dim)
+    #     kinematic_input = s[:,:-int(self.vision_dim*self.vision_channels)]
+
+    #     # v = torch.tanh(self.lv1e(self.bnv1(vision_input))) * torch.sigmoid(self.lv1g(self.bnv1g(vision_input)))
+    #     # v = torch.tanh(self.lv2e(self.bnv2(v))) * torch.sigmoid(self.lv2g(self.bnv2g(v)))
+    #     # v = torch.tanh(self.lv3e(self.bnv3(v))) * torch.sigmoid(self.lv3g(self.bnv3g(v)))
+    #     # # v = torch.tanh(self.lv4e(self.bnv4(v))) * torch.sigmoid(self.lv4g(self.bnv4g(v)))
+        
+    #     # k = F.relu(self.lk1(self.bnk1(kinematic_input).unsqueeze(1)))
+    #     # k = F.relu(self.lk2(self.bnk2(k)))
+    #     # k = F.relu(self.lk3(self.bnk3(k)))
+    #     # # k = torch.tanh(self.lk4(self.bnk4(k)))
+
+    #     # x = torch.cat([k,v],2)
+    #     # x = F.relu(self.lc1x1(self.bn4(x)))
+    #     # x = torch.sigmoid(self.lkv(x).squeeze(2))
+    #     # x = self.lkv2(x)
+    #     # x = torch.exp(x - x.max(1, keepdim=True)[0])
+    #     # PS_s = x / x.sum(1, keepdim=True)
+    #     # assert torch.all(PS_s == PS_s), 'EXPLOSION PS!'
+
+    #     v = torch.tanh(self.lv1e(vision_input)) * torch.sigmoid(self.lv1g(vision_input))
+    #     v = torch.tanh(self.lv2e(v)) * torch.sigmoid(self.lv2g(v))
+    #     v = torch.tanh(self.lv3e(v)) * torch.sigmoid(self.lv3g(v))
+    #     v = F.relu(self.lc1x1(v)).squeeze(1)
+        
+    #     k = F.relu(self.lk1(kinematic_input))
+
+    #     x = torch.cat([k,v],1)        
+    #     x = torch.sigmoid(self.lkv(x))
+    #     x = self.lkv2(x)
+    #     x = torch.exp(x - x.max(1, keepdim=True)[0])
+    #     PS_s = x / x.sum(1, keepdim=True)
+    #     assert torch.all(PS_s == PS_s), 'EXPLOSION PS!'
+
+    #     return PS_s
     
 class s_Net(nn.Module):
     def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, lr=3e-4, hidden_dim=256, 

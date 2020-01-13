@@ -54,6 +54,9 @@ def set_seed(n_seed):
 def is_float(x):
     return isinstance(x, float)
 
+def is_int(x):
+    return isinstance(x, int)
+
 def is_tensor(x):
     return isinstance(x, torch.FloatTensor) or isinstance(x, torch.Tensor)
 
@@ -87,10 +90,11 @@ class Agent:
                                         'cl': 1e-6
                                     },
                             'beta': {
-                                        'H(S|s)': 1e-20,
-                                        'H(S|R;T)': 1e-20,
-                                        'H(nS|S,A,T)': 1e-20,
-                                        'H(S|T)': 1e-20
+                                        'H(S)': 0.1,
+                                        'H(S|s)': 2e-2,
+                                        'H(S|R;T)': 2e-2,
+                                        'H(nS|S,A,T)': 2e-2,
+                                        'H(S|T)': 1e-4
                                     },
                             'init_epsilon': 0.00,
                             'min_epsilon': 0.00,
@@ -123,8 +127,9 @@ class Agent:
                                             'v_target': 5e-3
                                         },
                                     'cl': {
-                                            'alpha': 3e-2,
-                                            'beta': 3e-2
+                                            'alpha': 3e-4,
+                                            'beta': 3e-3,
+                                            'c': 3e-5
                                         }
                                     },
 
@@ -145,7 +150,8 @@ class Agent:
                             'gamma_tl': 0.95,
                             'clip_value': 1.0,
                             'classification_with_entropies': True,
-                            'n_update_cycles_ps': 10                                                                                     
+                            'n_update_cycles_ps': 10,
+                            'nu': 1.0                                                                                   
                         }
         
         for key, value in default_params.items():
@@ -166,6 +172,7 @@ class Agent:
                         'sl': 0,
                         'ql': 0
                     }
+        self.counter_cl = 0
 
         self.n_concepts = self.params['n_concepts']
         self.dim_excluded = self.params['dim_excluded']
@@ -187,12 +194,18 @@ class Agent:
                                             'sl': -a_dim*1.0,
                                             'ql': self.params['min_threshold_entropy_alpha_ql'],
                                             'cl': self.params['min_threshold_entropy_alpha_cl']
-                                        }
+                                        }         
         self.threshold_entropy_alpha = {
                                         'sl': self.params['init_threshold_entropy_alpha'],
                                         'ql': self.params['init_threshold_entropy_alpha'],
                                         'cl': self.params['init_threshold_entropy_alpha_cl']
                                     }
+        self.threshold_entropy_beta = {
+            'H(S)': self.params['init_threshold_entropy_alpha_cl']
+        }
+        self.min_threshold_entropy_beta = {
+            'H(S)': 0.1
+        }
         self.delta_threshold_entropy_alpha = self.params['delta_threshold_entropy_alpha']
         self.delta_threshold_entropy_alpha_cl = self.params['delta_threshold_entropy_alpha_cl']
         alpha = self.params['alpha']
@@ -215,6 +228,7 @@ class Agent:
         self.min_epsilon = self.params['min_epsilon']
         self.delta_epsilon = self.params['delta_epsilon']
         self.epsilon_tl = self.params['epsilon_tl']
+        self.nu = self.params['nu']
         # self.beta = self.params['init_beta']
         # self.max_beta = self.params['max_beta']
         # self.delta_beta = self.params['delta_beta']
@@ -223,7 +237,7 @@ class Agent:
         self.v = {
                             'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
                             'ql': v_Net(s_dim-self.dim_excluded['middle'], n_tasks['ql'], lr=self.lr['ql']['v']).to(device),
-                            'tl': np.random.rand(self.n_tasks['tl'], self.n_concepts, 1)
+                            'tl': np.zeros([self.n_tasks['tl'], self.n_concepts])
                         }
         self.v_target = {
                             'sl': v_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), n_tasks['sl'], lr=self.lr['sl']['v']).to(device),
@@ -232,16 +246,18 @@ class Agent:
         self.critic1 = {
                             'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
                             'ql': DQN(s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device),
-                            'tl': self.v['tl'].repeat(self.n_skills+1, axis=2)
+                            'tl': self.v['tl'][:,:,np.newaxis].repeat(self.n_skills+1, axis=2)
                         }
         self.critic2 = {
                             'sl': q_Net(s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, n_tasks['sl'], lr=self.lr['sl']['q']).to(device),
                             'ql': DQN(s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks['ql'], lr=self.lr['ql']['q']).to(device),
-                            'tl': self.v['tl'].repeat(self.n_skills+1, axis=2)
+                            'tl': self.v['tl'][:,:,np.newaxis].repeat(self.n_skills+1, axis=2)
                         }
         
         self.actor = s_Net(self.n_skills, s_dim-(self.dim_excluded['init']+self.dim_excluded['last']), a_dim, lr=self.lr['sl']['pi']).to(device)
-        self.classifier = c_Net(self.n_concepts, s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks=self.n_tasks['ql'], lr=3e-5).to(device)
+        self.classifier = c_Net(self.n_concepts, s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks=self.n_tasks['ql'], lr=1.0e-1, gamma=1.0).to(device)
+        self.classifier_policy = c_Net(self.n_concepts, s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks=self.n_tasks['ql'], lr=1.0e-1, gamma=1.0).to(device)
+        self.classifier_model = c_Net(self.n_concepts, s_dim-self.dim_excluded['middle'], self.n_skills+1, n_tasks=self.n_tasks['ql'], lr=1.0e-1, gamma=1.0).to(device)
 
         self.memory = {
                         'sl':  Memory(self.params['memory_capacity'], n_seed=self.seed),
@@ -267,7 +283,9 @@ class Agent:
         # self.prior_weight = 8*1000
 
         updateNet(self.v_target['sl'], self.v['sl'],1.0)
-        updateNet(self.critic2['ql'], self.critic1['ql'],1.0)    
+        updateNet(self.critic2['ql'], self.critic1['ql'],1.0) 
+        updateNet(self.classifier_policy, self.classifier,1.0)   
+        updateNet(self.classifier_model, self.classifier,1.0)    
     
     # def update_density(self, task, idx):
     #     self.density[task, idx] += 1.0/self.prior_weight
@@ -287,19 +305,19 @@ class Agent:
         with torch.no_grad():
             return self.classifier.sample_concept(state_cuda, explore=explore)[0]
 
-    def decide(self, state, task, learning_type, explore=True):
+    def decide(self, state, task, learning_type, explore=True, guess=False):
         if learning_type == 'ql':
             skill = self.decide_q_dist(state, task, explore=explore) if self.decision_type == 'q_dist' else self.decide_epsilon(state, task, explore=explore)
             return skill 
         elif learning_type == 'tl':
-            concept = self.relate_concept(state, explore=explore)
+            concept = self.relate_concept(state, explore=guess)
             skill = self.decide_concept_skill_pair(concept, task, explore=explore)
             return concept, skill
     
     def decide_concept_skill_pair(self, concept, task, explore=True):
         q = self.critic1['tl'][task, concept, :]
         epsilon = 0.0 if not explore else self.epsilon_tl 
-        skill = q.argmax() if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
+        skill = np.random.choice(np.flatnonzero(q == q.max())) if np.random.rand() > epsilon else np.random.randint(self.n_skills+1)
         return skill       
 
     def decide_q_dist(self, state, task, explore=True):
@@ -570,7 +588,8 @@ class Agent:
                 # Optimize skill network
                 pi_loss = -(v_approx_E).mean()# /self.RND_factor + v_approx_I).mean()
                 self.actor.optimizer.zero_grad()
-                pi_loss.backward(retain_graph=True)
+                # pi_loss.backward(retain_graph=True)
+                pi_loss.backward()
                 clip_grad_norm_(self.actor.parameters(), self.clip_value)
                 self.actor.optimizer.step()
 
@@ -596,23 +615,30 @@ class Agent:
             return metrics
     
     def learn_concepts(self):
-        batch = self.memory['ql'].sample(self.batch_size['ql'])
-        batch = np.array(batch)
+        batch_list = self.memory['ql'].sample(self.batch_size['ql'])
+        batch = np.array(batch_list)
+        del batch_list
+        
         batch_size = batch.shape[0]
 
         if batch_size > 0:
+            # self.counter_cl += 1
+            # sarsT
             s_batch = torch.FloatTensor(batch[:,self.dim_excluded['middle']:self.s_dim]).to(device)
             A_batch = batch[:,self.s_dim].astype('int')
             r_batch = torch.FloatTensor(batch[:,self.s_dim+1]).view(-1).to(device)  
             ns_batch = torch.FloatTensor(batch[:,self.s_dim+2+self.dim_excluded['middle']:2*self.s_dim+2]).to(device)
             T_batch = batch[:,2*self.s_dim+3].astype('int')
 
+            lr_inner = 6*[3e-4] + 12*[3e-4]
+
+            # AToff
             q = self.critic1['ql'](s_batch)[np.arange(batch_size), T_batch, :]
             A_batch_off = q.argmax(1)
 
             A_batch_one_hot_off = torch.zeros(batch_size, self.n_skills+1).to(device)
             A_batch_one_hot_off[np.arange(batch_size), A_batch_off] = torch.ones(batch_size,).to(device)
-            A_distribution_off = A_batch_one_hot_off.sum(0, keepdim=True)
+            A_distribution_off = A_batch_one_hot_off.sum(0, keepdim=True) + 1e-6
             A_distribution_off /= A_distribution_off.sum()
 
             A_batch_one_hot = torch.zeros(batch_size, self.n_skills+1).to(device)
@@ -621,82 +647,262 @@ class Agent:
             T_batch_one_hot = torch.zeros(batch_size, self.n_tasks['cl']).to(device)
             T_batch_one_hot[np.arange(batch_size), T_batch] = torch.ones(batch_size,).to(device)
 
-            A_predicted, PA_ST, log_PA_ST, S, PS_s, log_PS_s, z = self.classifier.sample_skills(s_batch, T_batch_one_hot)
+            # A_predicted, PA_ST, log_PA_ST, S, PS_s, log_PS_s, z = self.classifier.sample_skills(s_batch, explore=False)
+            # S, PS_s, log_PS_s, PA_ST, log_PA_ST, _, log_PnS_SAT = self.classifier_policy(s_batch, A_batch_one_hot) if self.counter_cl <= 5000 else self.classifier_model(s_batch, A_batch_one_hot)
+            S, PS_s, log_PS_s, PA_ST, log_PA_ST, _, log_PnS_SAT = self.classifier(s_batch, A_batch_one_hot)
             HS_s = -(PS_s * log_PS_s).sum(1).mean()
 
-            PS_s_T = PS_s.unsqueeze(1) * T_batch_one_hot.unsqueeze(2)
-            ps_ST = PS_s_T / (PS_s_T.sum(0, keepdim=True) + 1e-10)
+            PS_s_T = PS_s.unsqueeze(1) * T_batch_one_hot.unsqueeze(2) + 1e-6
+            # ps_ST_unnormalized = PS_s_T
+            # log_ps_ST = torch.log(ps_ST_unnormalized) - torch.log(PS_s_T.sum(0, keepdim=True))
             PS_T = PS_s_T.mean(0)
-            PS_T = PS_T / (PS_T.sum(1, keepdim=True) + 1e-10)
-            i_ST = Categorical(probs=ps_ST.transpose(0,1).transpose(1,2)).sample(sample_shape=torch.Size([batch_size//4]))
-            sigma = (r_batch.max() - r_batch.min()) / batch_size
-            R_iST = r_batch[i_ST] + sigma * torch.randn(batch_size//4, self.n_tasks['cl'], self.n_concepts).to(device)
-            log_pR_k_iST = -0.5 * (torch.log(2*np.pi*sigma**2+1e-10).view(1,1,1,1) + (R_iST.unsqueeze(1) - r_batch.view(1,-1,1,1))**2/sigma**2)
-            log_pR_pST_iS = torch.logsumexp(log_pR_k_iST.unsqueeze(4) + torch.log(ps_ST+1e-10).unsqueeze(0).unsqueeze(3), dim=1)
-            log_PR_ST_i = log_pR_pST_iS[:, :, np.arange(self.n_concepts), np.arange(self.n_concepts)]
-            log_PR_T_iS = torch.logsumexp(log_pR_pST_iS + torch.log(PS_T+1e-10).unsqueeze(0).unsqueeze(2), dim=3)
-            log_PS_RT = log_PR_ST_i + torch.log(PS_T+1e-10).unsqueeze(0) - log_PR_T_iS
-            HS_R_T = - (PS_T * log_PS_RT.mean(0)).sum(1, keepdim=True)
+            PS_T = PS_T / PS_T.sum(1, keepdim=True)
+            log_PS_T = torch.log(PS_T)
+            PT_S = (PS_T / PS_T.sum(0, keepdim=True)).detach()
+            # i_ST = Categorical(logits=log_ps_ST.transpose(0,1).transpose(1,2)).sample(sample_shape=torch.Size([batch_size//div]))
+            # sigma = (r_batch.max() - r_batch.min()) / batch_size
+            # R_iST = r_batch[i_ST] + sigma * torch.randn(batch_size//div, self.n_tasks['cl'], self.n_concepts).to(device)
+            # log_pR_k_iST = -0.5 * (torch.log(2*np.pi*sigma**2).item() + (R_iST.unsqueeze(1) - r_batch.view(1,-1,1,1))**2/sigma**2)
+            # log_pR_pST_iS = torch.logsumexp(log_pR_k_iST.unsqueeze(4) + log_ps_ST.unsqueeze(0).unsqueeze(3), dim=1)
+            # log_PR_ST_i = log_pR_pST_iS[:, :, np.arange(self.n_concepts), np.arange(self.n_concepts)]
+            # log_PR_T_iS = torch.logsumexp(log_pR_pST_iS + log_PS_T.unsqueeze(0).unsqueeze(2), dim=3)
+            # log_PS_RT = log_PR_ST_i + log_PS_T.unsqueeze(0) - log_PR_T_iS
+            # HS_R_T = - (PS_T * log_PS_RT.mean(0)).sum(1, keepdim=True)
 
-            nS, PnS_ns, log_PnS_ns = self.classifier.sample_concepts(ns_batch)
-            AT_mask = T_batch_one_hot.unsqueeze(2) * A_batch_one_hot.unsqueeze(1)
-            PnS_S_iT = (PS_s.unsqueeze(2) * PnS_ns.unsqueeze(1)).unsqueeze(1) / (PS_T.unsqueeze(0).unsqueeze(3) + 1e-10)
-            PnS_SAT = torch.einsum('ihjl,ihk->hjkl', PnS_S_iT, AT_mask)
-            # N = PnS_SAT.sum(3, keepdim=True)
-            # N = N * (N.detach() > 0).float().to(device) + torch.ones_like(N.detach()) * (1 - (N.detach() > 0)).float().to(device)
-            PnS_SAT = PnS_SAT / (PnS_SAT.sum(3, keepdim=True) + 1e-10)
-            assert torch.all(PnS_SAT == PnS_SAT), 'EXPLOSION nS!'
-            HnS_SAT = -(PnS_SAT * torch.log(PnS_SAT + 1e-10)).sum(3) 
+            nS_batch_off, PnS_ns = self.classifier.sample_concepts(ns_batch, explore=False)[:2]
+            # nS_batch_off, PnS_ns = self.classifier_policy.sample_concepts(ns_batch, explore=False)[:2] if self.counter_cl <= 5000 else self.classifier_model.sample_concepts(ns_batch, explore=False)[:2]
+            # AT_mask = T_batch_one_hot.unsqueeze(2) * A_batch_one_hot.unsqueeze(1)
+            # PnS_S_iT = (PS_s.unsqueeze(2) * PnS_ns.detach().unsqueeze(1)).unsqueeze(1) / (PS_T.unsqueeze(0).unsqueeze(3))
+            # PnS_SAT_ = torch.einsum('ihjl,ihk->hjkl', PnS_S_iT, AT_mask) + 1e-6
+            # # N = PnS_SAT.sum(3, keepdim=True)
+            # # N = N * (N.detach() > 0).float().to(device) + torch.ones_like(N.detach()) * (1 - (N.detach() > 0)).float().to(device)
+            # PnS_SAT_ = PnS_SAT_ / PnS_SAT_.sum(3, keepdim=True)
+            # # assert torch.all(PnS_SAT == PnS_SAT), 'EXPLOSION nS!'
+            # HnS_SAT = -(PnS_SAT_ * torch.log(PnS_SAT_ + 1e-10)).sum(3) 
 
-            HS_T = -(PS_T * torch.log(PS_T + 1e-10)).sum(1, keepdim=True)
+            HS_R_T = torch.zeros(1).to(device)
+            HnS_SAT = torch.zeros(1).to(device)
+
+            HS_T = -(PS_T * log_PS_T).sum(1, keepdim=True)
             AT_mask_off = T_batch_one_hot.unsqueeze(2) * A_batch_one_hot_off.unsqueeze(1)
-            PA_T = AT_mask_off.sum(0)
+            PA_T = AT_mask_off.sum(0) + 1e-6
             # NA_T = PA_T.sum(1, keepdim=True)
             # NA_T = NA_T * (NA_T.detach() > 0).float().to(device) + torch.ones_like(NA_T.detach()) * (1 - (NA_T.detach() > 0)).float().to(device)
-            PA_T = PA_T / (PA_T.sum(1, keepdim=True) + 1e-10)
-            assert torch.all(PA_T == PA_T), 'EXPLOSION A!'
-            HA_T = -(PA_T * torch.log(PA_T + 1e-10)).sum(1, keepdim=True)
-            
-            beta_Ss_gradient = (HS_s - self.threshold_entropy_alpha['cl']).detach().item()
-            beta_gradient_SR = (HS_R_T.squeeze(1) - self.threshold_entropy_alpha['cl']).detach()
-            beta_gradient_nSSAT = (HnS_SAT - self.threshold_entropy_alpha['cl']).detach()
-            beta_gradient_ST = (HA_T - HS_T).squeeze(1).detach()
-            classification_loss = (-log_PA_ST / ((self.n_skills + 1) * A_distribution_off.clamp(1.0/batch_size, 1.0)))[np.arange(batch_size), A_batch_off].mean()
+            PA_T = PA_T / PA_T.sum(1, keepdim=True)
+            # assert torch.all(PA_T == PA_T), 'EXPLOSION A!'
+            HA_T = -(PA_T * torch.log(PA_T)).sum(1, keepdim=True)
 
-            classifier_loss = 1e+3*classification_loss
-            if self.classification_with_entropies:
-                classifier_loss += self.beta['H(S|s)'] * HS_s
-                classifier_loss += (self.beta['H(S|R;T)'].view(-1,1) * HS_R_T).mean()
-                classifier_loss += (self.beta['H(nS|S,A,T)'] * HnS_SAT).mean()
-                classifier_loss -= (self.beta['H(S|T)'].view(-1,1) * HS_T).mean()
+            # cross_task_mask = torch.from_numpy((T_batch.reshape(-1,1) == T_batch.reshape(1,-1))*1.0).float().to(device)
+            task_importance_weights = PT_S[:,S].transpose(0,1).unsqueeze(1) * PT_S[:,S].transpose(0,1).unsqueeze(0) * self.n_tasks['ql']
+            skill_similarity = (((PA_ST.detach().unsqueeze(1) * PA_ST.detach().unsqueeze(0))).sum(3) * task_importance_weights).sum(2) # * cross_task_mask 
+            concept_divergence = 0.5*((PS_s.unsqueeze(1) - PS_s.unsqueeze(0).detach())**2).sum(2)
+            compactness = (skill_similarity * concept_divergence).mean() # self.n_tasks['ql'] *
 
-            self.classifier.optimizer.zero_grad()
-            classifier_loss.backward(retain_graph=True)
-            clip_grad_norm_(self.classifier.parameters(), self.clip_value)
-            self.classifier.optimizer.step()
-            assert torch.all(self.classifier.lv1e.weight==self.classifier.lv1e.weight), 'EXPLOSION c'
+            # if self.classification_with_entropies:
+                # beta_Ss_gradient = -(HS_s - self.threshold_entropy_alpha['cl']).detach().item()
+            # beta_gradient_ST = (HA_T - HS_T).squeeze(1).detach()
+            #     beta_gradient_SR = (HS_R_T.squeeze(1) - self.threshold_entropy_alpha['cl']).detach()
+            #     beta_gradient_nSSAT = (HnS_SAT - self.threshold_entropy_alpha['cl']).detach()
+                
+            # unused_skills = torch.isclose(PA_T, torch.zeros_like(PA_T)).sum(1).float()
+            classification_loss = -log_PA_ST[np.arange(batch_size), T_batch, A_batch_off].mean() #  / ((self.n_skills + 1 - unused_skills[T_batch]) * PA_T[T_batch, A_batch_off])
+            prediction_loss = -log_PnS_SAT[np.arange(batch_size), T_batch, nS_batch_off.detach()].mean()
+
+            # log_PA_ST_policy = self.classifier_policy(s_batch, A_batch_one_hot, active_model=False)[-1][np.arange(batch_size), T_batch, A_batch_off]
+            # log_PnS_SAT_model = self.classifier_model(s_batch, A_batch_one_hot, active_map=False)[-1][np.arange(batch_size), T_batch, nS_batch_off.detach()]
+            # classifier_loss_policy = (-log_PA_ST_policy / ((self.n_skills + 1 - unused_skills[T_batch]) * PA_T[T_batch, A_batch_off])).mean()
+            # classifier_loss_model = -log_PnS_SAT_model.mean()
+
+            # if self.counter_cl <= 5000:
+            #     self.classifier_policy.optimizer.zero_grad()
+            #     classification_loss.backward()
+            #     clip_grad_norm_(self.classifier_policy.parameters(), self.clip_value)
+            #     self.classifier_policy.optimizer.step()
+
+            #     log_PnS_SAT_policy = self.classifier_policy(s_batch, A_batch_one_hot, active_map=False)[-1][np.arange(batch_size), T_batch, nS_batch_off.detach()]            
+            #     counterfactual_loss_policy = -log_PnS_SAT_policy.mean()
+
+            #     if prediction_loss.detach() + 0.05 > counterfactual_loss_policy:
+            #         updateNet(self.classifier_model, self.classifier_policy, 1.0)
+            #     else:
+            #         updateNet(self.classifier_policy, self.classifier_model, 1.0)
+
+            # else:
+            #     self.classifier_model.optimizer.zero_grad()
+            #     prediction_loss.backward()
+            #     clip_grad_norm_(self.classifier_model.parameters(), self.clip_value)
+            #     self.classifier_model.optimizer.step()
+
+            #     log_PA_ST_model = self.classifier_model(s_batch, A_batch_one_hot, active_model=False)[-1][np.arange(batch_size), T_batch, A_batch_off]
+            #     counterfactual_loss_model = (-log_PA_ST_model / ((self.n_skills + 1 - unused_skills[T_batch]) * PA_T[T_batch, A_batch_off])).mean()
+
+            #     if classification_loss.detach() - 0.05 > counterfactual_loss_model:
+            #         updateNet(self.classifier_policy, self.classifier_model, 1.0)                    
+            #     else:
+            #         updateNet(self.classifier_model, self.classifier_policy, 1.0)
+            # if self.counter_cl == 10000: self.counter_cl = 0
+
+            # updateNet(self.classifier, self.classifier_policy, 1.0)            
+
+            # delta_model = classification_loss.detach() - counterfactual_loss_model 
+            # delta_policy = prediction_loss.detach() - counterfactual_loss_policy 
+            # classifier_loss = (delta_policy.detach() > 0.0).float() * classification_loss + 0.1*(delta_model.detach() > 0.0).float() * prediction_loss #+ self.nu * compactness
+            # if self.classification_with_entropies:
+                # classifier_loss -= self.beta['H(S|s)'] * HS_s
+                # classifier_loss += (self.beta['H(S|R;T)'].view(-1,1) * HS_R_T).mean()
+                # classifier_loss += (self.beta['H(nS|S,A,T)'] * HnS_SAT).mean()
+            # classifier_loss -= (self.beta['H(S|T)'].view(-1,1) * HS_T).mean()
+            # classifier_loss += self.nu * compactness
+
+
+            # classifier_loss = classification_loss if self.counter_cl <= 5000 else prediction_loss
+
+            # self.classifier.optimizer.zero_grad()
+            # classifier_loss.backward(retain_graph=True)
+            # clip_grad_norm_(self.classifier.parameters(), self.clip_value)
+            # self.classifier.optimizer.step()
+
+            # if self.counter_cl <= 5000:
+            #     self.classifier.model.optimizer.zero_grad()
+            #     prediction_loss.backward()
+            #     clip_grad_norm_(self.classifier.model.parameters(), self.clip_value)
+            #     self.classifier.model.optimizer.step()
+            # else:
+            #     self.classifier.map.optimizer.zero_grad()
+            #     classification_loss.backward()
+            #     clip_grad_norm_(self.classifier.map.parameters(), self.clip_value)
+            #     self.classifier.map.optimizer.step()
+
+            # updateNet(self.classifier_policy, self.classifier, 1.0)
+            # updateNet(self.classifier_model, self.classifier, 1.0)
+            # assert torch.all(self.classifier.l1.weight==self.classifier.l1.weight), 'EXPLOSION c'
+            # self.lr['cl']['c']_scheduler.step()
+            # if (self.counter_cl % 10000) == 0: self.counter_cl = 0 
+            # updateNet(self.classifier_target, self.classifier, 5e-3)
+
+            # assert torch.all(self.classifier.lv1e.weight==self.classifier.lv1e.weight), 'EXPLOSION c'
 
             # Optimize dual variables  
-            log_beta_Ss = np.log(self.beta['H(S|s)'])
-            log_beta_Ss += self.lr['cl']['beta'] * beta_Ss_gradient
-            self.beta['H(S|s)'] = np.exp(log_beta_Ss).clip(1e-20, 1e+2)
+            # if self.classification_with_entropies:
+                # log_beta_Ss = np.log(self.beta['H(S|s)'])
+                # log_beta_Ss += self.lr['cl']['beta'] * beta_Ss_gradient
+                # self.beta['H(S|s)'] = np.exp(log_beta_Ss).clip(1e-20, 1e+1)
 
-            log_beta_SR = torch.log(self.beta['H(S|R;T)'])
-            log_beta_SR += self.lr['cl']['beta'] * beta_gradient_SR
-            self.beta['H(S|R;T)'] = torch.exp(log_beta_SR).clamp(1e-20, 1e+2)
+            # log_beta_ST = torch.log(self.beta['H(S|T)'])
+            # log_beta_ST += self.lr['cl']['beta'] * beta_gradient_ST
+            # self.beta['H(S|T)'] = torch.exp(log_beta_ST).clamp(1e-10, 1e+1)
+            
+            #     log_beta_SR = torch.log(self.beta['H(S|R;T)'])
+            #     log_beta_SR += self.lr['cl']['beta'] * beta_gradient_SR
+            #     self.beta['H(S|R;T)'] = torch.exp(log_beta_SR).clamp(1e-20, 1e+1)
 
-            log_beta_nSSAT = torch.log(self.beta['H(nS|S,A,T)'])
-            log_beta_nSSAT += self.lr['cl']['beta'] * beta_gradient_nSSAT
-            self.beta['H(nS|S,A,T)'] = torch.exp(log_beta_nSSAT).clamp(1e-20, 1e+2)
+            #     log_beta_nSSAT = torch.log(self.beta['H(nS|S,A,T)'])
+            #     log_beta_nSSAT += self.lr['cl']['beta'] * beta_gradient_nSSAT
+            #     self.beta['H(nS|S,A,T)'] = torch.exp(log_beta_nSSAT).clamp(1e-20, 1e+1)
 
-            log_beta_ST = torch.log(self.beta['H(S|T)'])
-            log_beta_ST += self.lr['cl']['beta'] * beta_gradient_ST
-            self.beta['H(S|T)'] = torch.exp(log_beta_ST).clamp(1e-20, 1e+2)
+                # self.threshold_entropy_alpha['cl'] = np.max([self.threshold_entropy_alpha['cl'] - 2*self.delta_threshold_entropy_alpha_cl, 0.0]) #self.min_threshold_entropy_alpha['cl']])
 
-            self.threshold_entropy_alpha['cl'] = np.max([self.threshold_entropy_alpha['cl'] - self.delta_threshold_entropy_alpha_cl, self.min_threshold_entropy_alpha['cl']])
-        
-            return(classification_loss.detach().item(), HS_s.detach().item(), HS_R_T.detach().mean().item(), 
-                    HnS_SAT.detach().mean().item(), (HS_T-HA_T).detach().mean().item()) 
+            params_classification = list(self.classifier.classifier.parameters())+list(self.classifier.map.parameters())
+            classification_grad = torch.autograd.grad(classification_loss, params_classification, retain_graph=True)
+            fast_weights_policy = list(map(lambda p: p[1] - p[2] * p[0], zip(classification_grad, params_classification, lr_inner)))
+
+            params_prediction = list(self.classifier.classifier.parameters())+list(self.classifier.model.parameters())
+            prediction_grad = torch.autograd.grad(prediction_loss, params_prediction)
+            fast_weights_model = list(map(lambda p: p[1] - p[2] * p[0], zip(prediction_grad, params_prediction, lr_inner)))
+
+            # params_policy =  list(self.classifier_policy.classifier.parameters())+list(self.classifier_policy.map.parameters())
+            # for target_param, source_param in zip(params_policy, fast_weights_policy):
+            #     target_param.data.copy_(source_param)
+
+            # params_model =  list(self.classifier_model.classifier.parameters())+list(self.classifier_model.model.parameters())
+            # for target_param, source_param in zip(params_model, fast_weights_model):
+            #     target_param.data.copy_(source_param)
+            
+            # nS_batch_off_2 = self.classifier_model.sample_concepts(ns_batch_2, explore=False)[0]
+            # log_PnS_SAT = self.classifier_model(s_batch_2, A_batch_one_hot_2, active_map=False)[-1][np.arange(batch_size), T_batch_2, nS_batch_off_2.detach()]            
+            # counterfactual_loss_model = -log_PnS_SAT.mean()
+
+            # log_PA_ST = self.classifier_policy(s_batch_2, A_batch_one_hot_2, active_model=False)[-1][np.arange(batch_size), T_batch_2, A_batch_off_2]
+            # counterfactual_loss_policy = (-log_PA_ST / ((self.n_skills + 1 - unused_skills[T_batch_2]) * PA_T[T_batch_2, A_batch_off_2])).mean()
+
+            # params_policy =  list(self.classifier_policy.classifier.parameters())+list(self.classifier_policy.map.parameters())
+            # grad_policy = torch.autograd.grad(counterfactual_loss_policy, params_policy)
+            # new_weights_policy = list(map(lambda p: p[1] - 0.5*self.lr['cl']['c'] * p[0], zip(grad_policy, params_classification)))
+            # for target_param, source_param in zip(params_classification, new_weights_policy):
+            #     target_param.data.copy_(source_param)
+
+            # params_model =  list(self.classifier_model.classifier.parameters())+list(self.classifier_model.model.parameters())
+            # grad_model = torch.autograd.grad(counterfactual_loss_model, params_model)
+            # new_weights_model = list(map(lambda p: p[1] - 0.5*self.lr['cl']['c'] * p[0], zip(grad_model, params_prediction)))
+            # for target_param, source_param in zip(params_prediction, new_weights_model):
+            #     target_param.data.copy_(source_param)
+
+            # updateNet(self.classifier_policy, self.classifier, 1.0)
+            # updateNet(self.classifier_model, self.classifier, 1.0)
+
+            # return(classification_loss.detach().item(), prediction_loss.detach().mean().item(), 
+            #         HS_s.detach().item(), HS_R_T.detach().mean().item(), 
+            #         HnS_SAT.detach().mean().item(), (HS_T-HA_T).detach().mean().item(), 
+            #         compactness.detach().mean().item()) 
+            
+            classifier_loss = 0.0
+            N = 1
+            for k in range(0, N):
+                batch_list_2 = self.memory['ql'].sample(self.batch_size['ql'])
+                batch_2 = np.array(batch_list_2)
+                del batch_list_2
+
+                s_batch_2 = torch.FloatTensor(batch_2[:,self.dim_excluded['middle']:self.s_dim]).to(device)
+                A_batch_2 = batch_2[:,self.s_dim].astype('int')
+                r_batch_2 = torch.FloatTensor(batch_2[:,self.s_dim+1]).view(-1).to(device)  
+                ns_batch_2 = torch.FloatTensor(batch_2[:,self.s_dim+2+self.dim_excluded['middle']:2*self.s_dim+2]).to(device)
+                T_batch_2 = batch_2[:,2*self.s_dim+3].astype('int')
+
+                q_2 = self.critic1['ql'](s_batch_2)[np.arange(batch_size), T_batch_2, :]
+                A_batch_off_2 = q_2.argmax(1)
+
+                A_batch_one_hot_off_2 = torch.zeros(batch_size, self.n_skills+1).to(device)
+                A_batch_one_hot_off_2[np.arange(batch_size), A_batch_off_2] = torch.ones(batch_size,).to(device)
+                
+                A_batch_one_hot_2 = torch.zeros(batch_size, self.n_skills+1).to(device)
+                A_batch_one_hot_2[np.arange(batch_size), A_batch_2] = torch.ones(batch_size,).to(device)
+
+                T_batch_one_hot_2 = torch.zeros(batch_size, self.n_tasks['cl']).to(device)
+                T_batch_one_hot_2[np.arange(batch_size), T_batch_2] = torch.ones(batch_size,).to(device)
+
+                nS_batch_off_2 = self.classifier.sample_concepts(ns_batch_2, explore=False, vars_=fast_weights_model[:6])[0]
+                log_PnS_SAT_2 = self.classifier(s_batch_2, A_batch_one_hot_2, active_map=False, vars_cla=fast_weights_model[:6], vars_mod=fast_weights_model[6:])[-1]            
+                counterfactual_prediction_loss = -log_PnS_SAT_2[np.arange(batch_size), T_batch_2, nS_batch_off_2.detach()].mean()
+
+                log_PA_ST_2 = self.classifier(s_batch_2, A_batch_one_hot_2, active_model=False, vars_cla=fast_weights_policy[:6], vars_map=fast_weights_policy[6:])[-1]
+                counterfactual_classification_loss = -log_PA_ST_2[np.arange(batch_size), T_batch_2, A_batch_off_2].mean() #  / ((self.n_skills + 1 - unused_skills[T_batch_2]) * PA_T[T_batch_2, A_batch_off_2])
+
+                if (k+1) < N:
+                    classification_grad = torch.autograd.grad(counterfactual_classification_loss, fast_weights_policy, retain_graph=True)
+                    fast_weights_policy = list(map(lambda p: p[1] - p[2] * p[0], zip(classification_grad, fast_weights_policy, lr_inner[:12])))
+
+                    prediction_grad = torch.autograd.grad(counterfactual_prediction_loss, fast_weights_model)
+                    fast_weights_model = list(map(lambda p: p[1] - p[2] * p[0], zip(prediction_grad, fast_weights_model, lr_inner[:12])))
+                else:          
+                    classifier_loss += ( 7*counterfactual_classification_loss + counterfactual_prediction_loss ) / 8.0
+
+            grad = torch.autograd.grad(classifier_loss, self.classifier.parameters())
+            maxx = [g.abs().max() for g in grad]
+            lr = 6*[1.0e-2] + 12*[1.0e-2]
+            new_weights = list(map(lambda p: p[1] - p[2] * p[0], zip(grad, self.classifier.parameters(), lr)))
+
+            for target_param, source_param in zip(self.classifier.parameters(), new_weights):
+                target_param.data.copy_(source_param)
+
+            # self.classifier.optimizer.zero_grad()
+            # classifier_loss.backward()
+            # clip_grad_norm_(self.classifier.parameters(), self.clip_value)
+            # self.classifier.optimizer.step()
+
+            return(classification_loss.detach().item(), prediction_loss.detach().mean().item(), 
+                    HS_s.detach().item(), HS_R_T.detach().mean().item(), 
+                    HnS_SAT.detach().mean().item(), (HS_T-HA_T).detach().mean().item(), 
+                    compactness.detach().mean().item()) 
         else:
             print("Here")
 
@@ -715,6 +921,7 @@ class Agent:
 
     def tabular_learning(self, sample):
         s, a, r, ns, _, t = sample
+        s, a, t, ns = int(s),int(a),int(t),int(ns)
         self.update_tabular_model(s, a, r, ns, t)
         self.prioritize(t, s, a)
         self.prioritized_sweeping()
@@ -727,13 +934,15 @@ class Agent:
     def prioritized_sweeping(self):
         for cycle in range(0, self.n_update_cycles_ps):
             if not self.priority_queue.empty:
-                t, s = self.priority_queue.pop()
-                self.critic2['tl'][t,s,:] = self.critic1['tl'][t,s,:].copy()
-                delta_V = self.state_backup(t, s)
-                for ps, pa in itertools.product(np.arange(0,self.n_concepts), np.arange(0,self.n_skills+1)):
-                    if self.counts['Ntsas'][t,ps,pa,s] > 0:
-                        self.small_backup(t, ps, pa, s, delta_V)
-                        self.prioritize(t, ps, pa)
+                sample = self.priority_queue.pop()
+                if sample != 0:
+                    t, s = sample
+                    self.critic2['tl'][t,s,:] = self.critic1['tl'][t,s,:].copy()
+                    delta_V = self.state_backup(t, s)
+                    for ps, pa in itertools.product(np.arange(0,self.n_concepts), np.arange(0,self.n_skills+1)):
+                        if self.counts['Ntsas'][t,ps,pa,s] > 0:
+                            self.small_backup(t, ps, pa, s, delta_V)
+                            self.prioritize(t, ps, pa)
     
     def estimate_metrics(self, learning_type):
         metrics = {}
@@ -777,6 +986,12 @@ class Agent:
         elif learning_type == 'cl':
             suffix = '_we' if self.classification_with_entropies else '_woe'
             torch.save(self.classifier.state_dict(), specific_path+'_classifier' + suffix + '.pt')
+        elif learning_type == 'tl':
+            pickle.dump(self.critic1[learning_type],open(specific_path+'_critic1_'+learning_type+'.p','wb'))
+            pickle.dump(self.critic2[learning_type],open(specific_path+'_critic2_'+learning_type+'.p','wb'))
+            pickle.dump(self.v[learning_type],open(specific_path+'_v_'+learning_type+'.p','wb'))
+            pickle.dump(self.counts,open(specific_path+'_counts.p','wb'))
+            pickle.dump(self.priority_queue,open(specific_path+'_priority_queue.p','wb'))
     
     def load(self, common_path, specific_path, learning_type, load_memory=True):
         if learning_type in ['sl', 'ql']:
@@ -812,8 +1027,36 @@ class Agent:
         elif learning_type == 'cl':
             suffix = '_we' if self.classification_with_entropies else '_woe'
             self.classifier.load_state_dict(torch.load(specific_path+'_classifier' + suffix + '.pt'))
-            self.classifier.train()
+            self.classifier.eval()
+        elif learning_type == 'tl':
+            self.critic1[learning_type] = pickle.load(open(specific_path+'_critic1_'+learning_type+'.p','rb'))
+            self.critic2[learning_type] = pickle.load(open(specific_path+'_critic2_'+learning_type+'.p','rb'))
+            self.v[learning_type] = pickle.load(open(specific_path+'_v_'+learning_type+'.p','rb'))
+            self.counts = pickle.load(open(specific_path+'_counts.p','rb'))
+            self.priority_queue = pickle.load(open(specific_path+'_priority_queue.p','rb'))
+    
+    def classify(self, T, path=''):
+        data = self.memory['ql'].data
+        task_data = [i for i in data if int(i[2*self.s_dim+3]) == T]
+        task_data = np.array(task_data)
+        data_size = task_data.shape[0]
         
+        if data_size > 0:
+            s = task_data[:,:self.s_dim]
+            s_cuda = torch.FloatTensor(s[:,self.dim_excluded['middle']:]).to(device)
+            S, PS_s = self.classifier.sample_concepts(s_cuda, explore=False)[:2]
+                    
+            x, y, q = s[:,0].reshape(-1,1), s[:,1].reshape(-1,1), s[:,3:7]
+            cos_half_theta = 1-2*(q[:,2]**2+q[:,3]**2)
+            sin_half_theta = 2*(q[:,0]*q[:,3] + q[:,1]*q[:,2])
+            theta = np.arctan2(sin_half_theta, cos_half_theta).reshape(-1,1)
+
+            angles = np.linspace(-np.pi, np.pi, 9)
+            deltas = theta - angles.reshape(1,-1)
+            group_id = (np.abs(deltas) <= np.pi/8).argmax(1).reshape(-1,1)
+            group_id = np.array([group_id[i] if group_id[i] != 8 else 0 for i in range(0, data_size)])
+            export_data = np.concatenate((x, y, theta, S.view(-1,1).numpy(), group_id), axis=1)
+            np.savetxt(path + 'classified_samples.txt', export_data)
 
 #----------------------------------------------
 #
@@ -831,7 +1074,7 @@ class System:
                             'env_names_tl': [],
                             'env_steps_sl': 1,
                             'env_steps_ql': 10,
-                            'env_steps_tl': 1000, 
+                            'env_steps_tl': 100, 
                             'grad_steps': 1, 
                             'init_steps': 10000,
                             'max_episode_steps': 1000,
@@ -841,7 +1084,7 @@ class System:
                             'tr_epsd_ql': 1130,
                             'tr_epsd_tl': 1000,
                             'tr_steps_cl': 100000,
-                            'tr_steps_tl': 100,
+                            'tr_steps_tl': 1000,
                             'eval_epsd_sl': 2,
                             'eval_epsd_interval': 10,
                             'eval_epsd_ql': 2,
@@ -990,6 +1233,7 @@ class System:
 
         max_env_step = self.steps['env'][self.learning_type]
         next_concept = concept
+        n_different = 0
 
         for env_step in itertools.count(0):
             action = self.agent.act(state, skill, explore=explore if self.learning_type == 'sl' else False)
@@ -1000,6 +1244,8 @@ class System:
             final_state = np.copy(next_state)
             angle_idx = (info['angle'] * 8).astype(int) if self.learning_type == 'sl' else 0
             next_concept = self.agent.relate_concept(next_state, explore=explore)
+
+            if next_concept != concept: n_different += 1
 
             event[:self.s_dim] = state
             event[self.s_dim:self.sa_dim] = action
@@ -1012,7 +1258,9 @@ class System:
             if remember and self.learning_type == 'sl': self.agent.memorize(event.copy(), self.learning_type)
             # if remember and learn and self.learning_type == 'sl': self.agent.update_density(self.task, angle_idx)
             if env_step < self.steps['env'][self.learning_type]-1: state = np.copy(next_state)
-            if end_step or ((env_step+1) >= max_env_step) or (self.learning_type == 'tl' and next_concept != concept): break
+            if end_step or ((env_step+1) >= max_env_step) or (self.learning_type == 'tl' and n_different >= 3): break
+
+            if self.render and ((env_step+1)%10) == 0: self.envs[self.learning_type][self.task].render()
             
         if self.learning_type == 'ql':
             event = np.empty(2*self.s_dim+4)
@@ -1075,6 +1323,7 @@ class System:
             self.agent.memory['ql'].forget()
             self.learning_type = 'tl'
             self.set_envs()
+            self.agent.classifier.eval()
             self.train_agent_skills(storing_path=storing_path, iter_0=init_iter)
     
     def train_agent_skills(self, iter_0=0, rewards=[], metrics=[], storing_path=''):        
@@ -1086,7 +1335,7 @@ class System:
             iter_ = iter_0 + (epsd+1) // self.epsds['eval']['interval']
             
             for epsd_step in range(0, self.steps['tr'][self.learning_type]):
-                if self.agent.memory[self.learning_type].len_data < self.batch_size:
+                if self.agent.memory[self.learning_type].len_data < self.batch_size and self.learning_type != 'tl':
                     done = self.interaction(learn=False)[1]
                 else:
                     done = self.interaction(learn=True)[1]
@@ -1113,16 +1362,19 @@ class System:
         suffix = '_we' if self.agent.classification_with_entropies else '_woe'
 
         for grad_step in range(0, self.steps['tr'][self.learning_type]):
-            loss, HS_s, HS_RT, HnS_SAT, delta_H = self.agent.learn_concepts()
-            losses.append(loss)
-            entropies.append([HS_s, HS_RT, HnS_SAT, delta_H])
+            classification_loss ,prediction_loss,  HS_s, HS_RT, HnS_SAT, delta_H, compactness = self.agent.learn_concepts()
+            losses.append([classification_loss, prediction_loss])
+            entropies.append([HS_s, HS_RT, HnS_SAT, delta_H, compactness])
 
             stdscr.addstr(0, 0, "Iteration: {}".format(grad_step))
-            stdscr.addstr(1, 0, "Classification Loss: {}".format(np.round(loss, 4)))
-            stdscr.addstr(2, 0, "Entropy H(S|s): {}".format(np.round(HS_s,4)))
-            stdscr.addstr(3, 0, "Entropy H(S|R;T): {}".format(np.round(HS_RT,4)))
-            stdscr.addstr(4, 0, "Entropy H(nS|S,A,T): {}".format(np.round(HnS_SAT,4)))
-            stdscr.addstr(5, 0, "Entropy diff. H(S|T)-H(A|T): {}".format(np.round(delta_H,4)))
+            stdscr.addstr(1, 0, "Classification Loss: {}".format(np.round(classification_loss, 4)))
+            stdscr.addstr(2, 0, "Prediction Loss: {}".format(np.round(prediction_loss, 4)))
+            stdscr.addstr(3, 0, "Entropy H(S|s): {}".format(np.round(HS_s,4)))
+            stdscr.addstr(4, 0, "Entropy H(S|R;T): {}".format(np.round(HS_RT,4)))
+            stdscr.addstr(5, 0, "Entropy H(nS|S,A,T): {}".format(np.round(HnS_SAT,4)))
+            stdscr.addstr(6, 0, "Entropy diff. H(S|T)-H(A|T): {}".format(np.round(delta_H,4)))
+            stdscr.addstr(7, 0, "Compactness: {}".format(np.round(compactness,4)))
+            stdscr.addstr(8, 0, "Optim lr: {}e-4".format(np.round(self.agent.classifier.optimizer.param_groups[0]['lr']*1e4,4)))
             stdscr.refresh()
 
             if (grad_step + 1) % 50000 == 0:
@@ -1202,8 +1454,8 @@ class System:
                 stdout.write("Iter %i, epsd %i, %s: %.4f, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
                     (iter_, (epsd+1), entropy, Ha_sT_average, min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
             else:
-                stdout.write("Iter %i, epsd %i, min r: %i, max r: %i, mean r: %i, epsd r: %i\r " %
-                    (iter_, (epsd+1), min_epsd_reward//1, max_epsd_reward//1, average_reward//1, epsd_reward//1))
+                stdout.write("Iter %i, epsd %i, min r: %.3f, max r: %.3f, mean r: %.3f, epsd r: %.3f\r " %
+                    (iter_, (epsd+1), min_epsd_reward, max_epsd_reward, average_reward, epsd_reward))
             stdout.flush()         
 
         if print_space: print("")
