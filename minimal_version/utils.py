@@ -1,6 +1,11 @@
 import numpy as np
 import torch
 import random
+import gym
+import collections
+
+def numpy2torch(np_array, device='cuda'):
+    return torch.FloatTensor(np_array).to(device)
 
 def updateNet(target, source, tau):    
     for target_param, source_param in zip(target.parameters(), source.parameters()):
@@ -31,3 +36,18 @@ def is_float(x):
 
 def is_tensor(x):
     return isinstance(x, torch.FloatTensor) or isinstance(x, torch.Tensor)
+
+
+class AntPixelWrapper(gym.ObservationWrapper):
+    def observation(self, obs):
+        return AntPixelWrapper.separate_state(obs)
+
+    @staticmethod
+    def separate_state(obs):
+        state = collections.OrderedDict()
+        state['inner_state'] = obs['state'][2:-60] # Eliminate the xy coordinates (first 2 entries) and the 'lidar' maze observations
+        outer_state = obs['pixels'].astype(np.float) / 255.0
+        outer_state = np.swapaxes(outer_state, 1, 2)
+        state['outer_state'] = np.swapaxes(outer_state, 0, 1)
+        state['first_level_obs'] = obs['state'][2:]
+        return state

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.distributions import Normal
+from torch.distributions import Normal, Categorical
 from torch.nn.parameter import Parameter
 
 from custom_layers import parallel_Linear, Linear_noisy
@@ -138,7 +138,7 @@ class s_Net(nn.Module):
 
 # Simple convolutional net that outputs a feature vector
 class vision_Net(nn.Module):
-    def __init__(self, input_channels=3):
+    def __init__(self, latent_dim=256, input_channels=3, height=84, width=168):
         super().__init__()
 
         self.conv = nn.Sequential(
@@ -149,16 +149,21 @@ class vision_Net(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU()
         )
+
+        conv_out_size = get_conv_out(self.conv, [input_channels, height, width])
+        self.fc = nn.Linear(conv_out_size, latent_dim)
         
-        self.apply(weights_init_rnd)
+        self.apply(weights_init_he)
         
     def forward(self, x):
-        conv_feat = self.conv(x).view(x.size()[0], -1)
-        return conv_feat
+        conv_feat = self.conv(x)
+        conv_feat = conv_feat.view(x.shape[0], -1) # Squeeze dimensions
+        feat = self.fc(conv_feat)
+        return feat
 
 
 class noisy_dueling_q_Net(nn.Module):
-    def __init__(self, s_dim, n_actions, lr=3e-4):
+    def __init__(self, s_dim, n_actions):
         super().__init__() 
         self.s_dim = s_dim
         self.n_actions = n_actions
@@ -168,11 +173,11 @@ class noisy_dueling_q_Net(nn.Module):
         self.lV = Linear_noisy(256, 1)
         self.lA = Linear_noisy(256, n_actions)
         
-        self.apply(weights_init_rnd)
-        torch.nn.init.orthogonal_(self.lV.weight, 0.01)
-        self.lV_E1.bias.data.zero_()
-        torch.nn.init.orthogonal_(self.lA.weight, 0.01)
-        self.lA_E1.bias.data.zero_()
+        # self.apply(weights_init_rnd)
+        # torch.nn.init.orthogonal_(self.lV.mean_weight, 0.01)
+        # self.lV.mean_bias.data.zero_()
+        # torch.nn.init.orthogonal_(self.lA.mean_weight, 0.01)
+        # self.lA.mean_bias.data.zero_()
         
     def forward(self, s):        
         x = F.relu(self.l1(s))
@@ -182,7 +187,34 @@ class noisy_dueling_q_Net(nn.Module):
         Q = V.view(-1,1) + A - A.mean(1, keepdim=True) 
         return Q
 
-# TODO: self.actor, self.lambda_, self.alpha
+
+class softmax_policy_Net(nn.Module):
+    def __init__(self, s_dim, n_actions):
+        super().__init__()
+        
+        self.s_dim = s_dim   
+        self.n_actions = n_actions 
+
+        self.logits_layer = Linear_noisy(256, n_actions)
+        self.logit_pipe = nn.Sequential(
+            Linear_noisy(s_dim, 256),
+            nn.ReLU(),
+            Linear_noisy(256, 256),
+            nn.ReLU(),
+            self.logits_layer            
+        )        
+        
+        # self.logit_pipe.apply(weights_init_rnd)
+        # torch.nn.init.orthogonal_(self.logits_layer.weight, 0.01)
+        # self.logits_layer.bias.data.zero_()
+        
+    def forward(self, s):    
+        logits = self.logit_pipe(s) 
+        PA_s = nn.Softmax(dim=1)(logits)
+        log_PA_s = nn.LogSoftmax(dim=1)(logits)
+        return PA_s, log_PA_s
+
+
 class discrete_actor_critic_Net(nn.Module):
     def __init__(self, s_dim, n_actions):
         super().__init__()   
@@ -190,19 +222,17 @@ class discrete_actor_critic_Net(nn.Module):
         self.s_dim = s_dim
         self.n_actions = n_actions     
 
-        self.q1 = noisy_dueling_q_Net(s_dim, n_actions, n_tasks, lr=lr)        
-        self.q1_target = noisy_dueling_q_Net(s_dim, n_actions, n_tasks, lr=lr)
-        self.q2 = noisy_dueling_q_Net(s_dim, n_actions, n_tasks, lr=lr)        
-        self.q2_target = noisy_dueling_q_Net(s_dim, n_actions, n_tasks, lr=lr)
+        self.q1 = noisy_dueling_q_Net(s_dim, n_actions)        
+        self.q1_target = noisy_dueling_q_Net(s_dim, n_actions)
+        self.q2 = noisy_dueling_q_Net(s_dim, n_actions)        
+        self.q2_target = noisy_dueling_q_Net(s_dim, n_actions)
         
-        self.actor = softmax_actorNet(n_actions, s_dim, n_tasks, lr=lr)        
-        self.lambda_ = attentionNet(s_dim, n_tasks)
+        self.actor = softmax_policy_Net(s_dim, n_actions) 
 
-        self.log_alpha = torch.zeros(n_tasks).to(device)
-        self.log_alpha.requires_grad = True
+        self.log_alpha = Parameter(torch.Tensor(1))
+        nn.init.constant_(self.log_alpha, 0.0)
         self.alpha = self.log_alpha.exp()
-        self.alpha_optim = optim.Adam([self.log_alpha], lr=lr, eps=1e-4)
-
+        
         updateNet(self.q1_target, self.q1, 1.0)
         updateNet(self.q2_target, self.q2, 1.0)
     
@@ -215,28 +245,28 @@ class discrete_actor_critic_Net(nn.Module):
         alpha, log_alpha = self.alpha.view(-1,1), self.log_alpha.view(-1,1)
         return q1, q1_target, q2, q2_target, pi, log_pi, alpha, log_alpha
     
-    def sample_skill(self, s, task, explore=True, rng=None):
-        PA_sT = self.actor(s.view(1,-1))[0].squeeze(0)[task,:].view(-1)
+    def sample_action(self, s, explore=True, rng=None):
+        PA_s = self.actor(s.view(1,-1))[0].squeeze(0).view(-1)
         if rng is None:
             if explore or np.random.rand() > 0.95:
-                A = Categorical(probs=PA_sT).sample().item()
+                A = Categorical(probs=PA_s).sample().item()
             else:
-                tie_breaking_dist = torch.isclose(PA_sT, PA_sT.max()).float()
+                tie_breaking_dist = torch.isclose(PA_s, PA_s.max()).float()
                 tie_breaking_dist /= tie_breaking_dist.sum()
                 A = Categorical(probs=tie_breaking_dist).sample().item()  
         else:
             if explore or rng.rand() > 0.95:
-                A = rng.choice(self.n_actions, p=PA_sT.detach().cpu().numpy())
+                A = rng.choice(self.n_actions, p=PA_s.detach().cpu().numpy())
             else:
-                A = PA_sT.detach().cpu().argmax().item()
+                A = PA_s.detach().cpu().argmax().item()
         return A
     
-    def sample_skills(self, s, T, explore=True):
-        PA_sT = self.actor(s)[0][np.arange(s.shape[0]), T, :]        
+    def sample_actions(self, s, explore=True):
+        PA_s = self.actor(s)[0]        
         if explore:
-            A = Categorical(probs=PA_sT).sample().cpu()
+            A = Categorical(probs=PA_s).sample().cpu()
         else:            
-            tie_breaking_dist = torch.isclose(PA_sT, PA_sT.max(1, keepdim=True)[0]).float()
+            tie_breaking_dist = torch.isclose(PA_s, PA_s.max(1, keepdim=True)[0]).float()
             tie_breaking_dist /= tie_breaking_dist.sum(1, keepdim=True)
             A = Categorical(probs=tie_breaking_dist).sample().cpu()                  
         return A
@@ -247,17 +277,30 @@ class discrete_actor_critic_Net(nn.Module):
 
 
 class vision_actor_critic_Net(nn.Module):
-    def __init__(self, n_actions, s_dim, lr=3e-4):
+    def __init__(self, s_dim, n_actions, latent_dim=256, lr=3e-4):
         super().__init__()
 
-        self.vision_net = vision_Net()
-        self.vision_net_target = vision_Net()
-        self.actor_critic_net = discrete_actor_critic_Net(n_actions, s_dim + 256)
+        self.vision_net = vision_Net(latent_dim=latent_dim)
+        self.vision_net_target = vision_Net(latent_dim=latent_dim)
+        self.actor_critic_net = discrete_actor_critic_Net(s_dim + latent_dim, n_actions)
 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
     
     def forward(self, inner_state, outer_state):
-        vision_features = self.vision_net(outer_state)
-        observation = torch.cat([inner_state, vision_features])
+        observation = self.observe(inner_state, outer_state)
         output = self.actor_critic_net(observation)
         return output
+
+    def observe(self, inner_state, outer_state):
+        vision_features = self.vision_net(outer_state)
+        observation = torch.cat([inner_state, vision_features], dim=1)
+        return observation
+
+    def sample_action(self, inner_state, outer_state, explore=True, rng=None):
+        # Add batch dimension to state
+        inner_state = inner_state.view(1,-1)
+        outer_state = outer_state.unsqueeze(0)
+
+        observation = self.observe(inner_state, outer_state)
+        A = self.actor_critic_net.sample_action(observation, explore=explore, rng=rng)
+        return A

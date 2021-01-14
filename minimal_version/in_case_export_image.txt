@@ -1,0 +1,5 @@
+# from PIL import Image
+# if store_images:
+#     im = Image.fromarray((np.swapaxes(np.swapaxes(state['outer_state'], 0, 2), 0, 1) * 255.0).astype(np.uint8))
+#     im.save(''+env.spec.id+str(step_counter)+'.jpg')
+# ! ffmpeg -framerate 32 -i ant%d.jpg square_wall.mp4  (To convert to video)
