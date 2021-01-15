@@ -27,7 +27,7 @@ class Second_Level_SAC_PolicyOptimizer(PolicyOptimizer):
     
     def optimize(self, agent, database): 
         if database.__len__() < self.batch_size:
-            return 0
+            return None
 
         # Sample batch
         inner_states, outer_states, actions, rewards, \
@@ -111,4 +111,14 @@ class Second_Level_SAC_PolicyOptimizer(PolicyOptimizer):
         actor_critic.update()
 
         # Anneal epsilon
-        self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])      
+        self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])    
+
+        metrics = {'loss': loss.item(),
+                    'q1_loss': q1_loss.item(),
+                    'q2_loss': q2_loss.item(),
+                    'actor_loss': actor_loss.item(),
+                    'alpha_loss': alpha_loss.item(),
+                    'SAC_epsilon': self.epsilon,
+                    'alpha': alpha.item()}
+
+        return metrics   
