@@ -8,9 +8,9 @@ from net_utils import freeze
 from utils import numpy2torch as np2torch
 from utils import time_stamp
 
-def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_level_a_dim=8, first_level_actor_lr=3e-4, 
+def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_level_a_dim=8, 
                 first_level_actor_path="/home/researcher/Diego/Concept_Learning_Ant/Test/19/102_actor_sl.pt"):
-    first_level_actor = s_Net(second_level_a_dim, first_level_s_dim, first_level_a_dim, lr=first_level_actor_lr)
+    first_level_actor = s_Net(second_level_a_dim, first_level_s_dim, first_level_a_dim)
     first_level_actor.load_state_dict(torch.load(first_level_actor_path))
     first_level_actor._a_dim = first_level_a_dim
     return first_level_actor

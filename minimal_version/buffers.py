@@ -55,7 +55,7 @@ class PixelExperienceBuffer:
                 states_th = torch.FloatTensor(states).to(device)
                 actions_th = torch.FloatTensor(actions).to(device)
                 rewards_th = torch.FloatTensor(rewards).view(-1,1).to(device)
-                dones_th = torch.ByteTensor(states).view(-1,1).float().to(device)
+                dones_th = torch.ByteTensor(dones).view(-1,1).float().to(device)
                 next_states_th = torch.FloatTensor(next_states).to(device)            
                 return states_th, actions_th, rewards_th, dones_th, next_states_th 
 
@@ -71,12 +71,11 @@ class PixelExperienceBuffer:
                 device = torch.device(dev_name)
                 inner_states_th = torch.FloatTensor(inner_states).to(device)
                 outer_states_th = torch.FloatTensor(outer_states).to(device)
-                actions_th = torch.ByteTensor(actions).to(device)
                 rewards_th = torch.FloatTensor(rewards).view(-1,1).to(device)
-                dones_th = torch.ByteTensor(states).view(-1,1).float().to(device)
+                dones_th = torch.ByteTensor(dones).view(-1,1).float().to(device)
                 next_inner_states_th = torch.FloatTensor(next_inner_states).to(device)
                 next_outer_states_th = torch.FloatTensor(next_outer_states).to(device)
-                return inner_states_th, outer_states_th, actions_th, rewards_th, \
+                return inner_states_th, outer_states_th, actions.astype('int'), rewards_th, \
                     dones_th, next_inner_states_th, next_outer_states_th
             
             else:

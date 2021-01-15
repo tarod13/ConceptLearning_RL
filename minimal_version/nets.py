@@ -13,7 +13,7 @@ device   = torch.device("cuda" if use_cuda else "cpu")
 
 
 class s_Net(nn.Module):
-    def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, lr=3e-4, hidden_dim=256, 
+    def __init__(self, n_m_actions, input_dim, output_dim, min_log_stdev=-20, max_log_stdev=2, hidden_dim=256, 
         latent_dim=0, min_c=2, init_method='glorot'):
         super().__init__()   
         self.a_dim = output_dim
@@ -43,8 +43,6 @@ class s_Net(nn.Module):
             self.l32.bias.data.uniform_(-3e-3, 3e-3)
         elif self.init_method == 'glorot':
             self.apply(weights_init_)
-
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)
     
     def conditional(self, s, A):
         x = s.clone().view(1,s.size(0))
@@ -182,8 +180,8 @@ class noisy_dueling_q_Net(nn.Module):
     def forward(self, s):        
         x = F.relu(self.l1(s))
         x = F.relu(self.l2(x))
-        V = self.lV(mu)        
-        A = self.lA(mu)
+        V = self.lV(x)        
+        A = self.lA(x)
         Q = V.view(-1,1) + A - A.mean(1, keepdim=True) 
         return Q
 
@@ -231,8 +229,7 @@ class discrete_actor_critic_Net(nn.Module):
 
         self.log_alpha = Parameter(torch.Tensor(1))
         nn.init.constant_(self.log_alpha, 0.0)
-        self.alpha = self.log_alpha.exp()
-        
+                
         updateNet(self.q1_target, self.q1, 1.0)
         updateNet(self.q2_target, self.q2, 1.0)
     
@@ -242,8 +239,8 @@ class discrete_actor_critic_Net(nn.Module):
         q2 = self.q2(s)
         q2_target = self.q2_target(s)
         pi, log_pi = self.actor(s)
-        alpha, log_alpha = self.alpha.view(-1,1), self.log_alpha.view(-1,1)
-        return q1, q1_target, q2, q2_target, pi, log_pi, alpha, log_alpha
+        log_alpha = self.log_alpha.view(-1,1)
+        return q1, q1_target, q2, q2_target, pi, log_pi, log_alpha
     
     def sample_action(self, s, explore=True, rng=None):
         PA_s = self.actor(s.view(1,-1))[0].squeeze(0).view(-1)
@@ -271,20 +268,21 @@ class discrete_actor_critic_Net(nn.Module):
             A = Categorical(probs=tie_breaking_dist).sample().cpu()                  
         return A
     
-    def update_targets(self, lr):
-        updateNet(self.q1_target, self.q1, lr)
-        updateNet(self.q2_target, self.q2, lr)
+    def update_targets(self, rate):
+        updateNet(self.q1_target, self.q1, rate)
+        updateNet(self.q2_target, self.q2, rate)
+    
+    def update(self, rate=5e-3):
+        self.update_targets(rate)
 
 
 class vision_actor_critic_Net(nn.Module):
-    def __init__(self, s_dim, n_actions, latent_dim=256, lr=3e-4):
+    def __init__(self, s_dim, n_actions, latent_dim=256):
         super().__init__()
 
         self.vision_net = vision_Net(latent_dim=latent_dim)
         self.vision_net_target = vision_Net(latent_dim=latent_dim)
         self.actor_critic_net = discrete_actor_critic_Net(s_dim + latent_dim, n_actions)
-
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)
     
     def forward(self, inner_state, outer_state):
         observation = self.observe(inner_state, outer_state)
@@ -304,3 +302,6 @@ class vision_actor_critic_Net(nn.Module):
         observation = self.observe(inner_state, outer_state)
         A = self.actor_critic_net.sample_action(observation, explore=explore, rng=rng)
         return A
+    
+    def update(self, rate=5e-3):
+        self.actor_critic_net.update(rate)

@@ -34,7 +34,4 @@ if __name__ == "__main__":
     print("Mean episode return: {:.2f}".format(G))
 
     agent.save(MODEL_PATH)
-    model_id = agent._id
-    agent = create_second_level_agent()
-    agent.load(MODEL_PATH, model_id)
-    print("Successful saving and loading of agent")
+    
