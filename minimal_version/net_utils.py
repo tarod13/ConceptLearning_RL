@@ -33,3 +33,7 @@ def updateNet(target, source, tau):
 def get_conv_out(conv_net, shape):
     o = conv_net(torch.zeros(1, *shape))
     return int(np.prod(o.size()))
+
+def freeze(model):
+    for param in model.parameters():
+        param.requires_grad = False

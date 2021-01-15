@@ -7,7 +7,7 @@ from buffers import PixelExperienceBuffer
 from trainer import Trainer
 
 from utils import numpy2torch as np2torch
-from utils import AntPixelWrapper
+from wrappers import AntPixelWrapper
 
 
 if __name__ == "__main__":
@@ -17,6 +17,7 @@ if __name__ == "__main__":
                             'camera_name':'front_camera'}}
     render = True
     n_steps = 1000
+    MODEL_PATH = '/home/researcher/Diego/Concept_Learning_minimal/saved_models/'
     
     env = AntPixelWrapper( 
             PixelObservationWrapper(gym.make(env_name).unwrapped,
@@ -28,7 +29,12 @@ if __name__ == "__main__":
 
     trainer = Trainer(train_level=2)
     returns = trainer.loop(env, agent, database, n_episodes=1, render=False, 
-                            max_episode_steps=n_steps, store_video=True)
-    G = returns.mean()
-
+                            max_episode_steps=n_steps, store_video=False)
+    G = returns.mean()    
     print("Mean episode return: {:.2f}".format(G))
+
+    agent.save(MODEL_PATH)
+    model_id = agent._id
+    agent = create_second_level_agent()
+    agent.load(MODEL_PATH, model_id)
+    print("Successful saving and loading of agent")
