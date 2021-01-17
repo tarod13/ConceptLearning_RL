@@ -9,18 +9,21 @@ import cv2
 video_folder = '/home/researcher/Diego/Concept_Learning_minimal/videos/'
 
 class Trainer:
-    def __init__(self, train_level=2):
+    def __init__(self, train_level=2, optimizer_kwargs={}):
         self._train_level = train_level
-        self.optimizer = Second_Level_SAC_PolicyOptimizer()
+        self.optimizer = Second_Level_SAC_PolicyOptimizer(**optimizer_kwargs)
 
-    def loop(self, env, agent, database, n_episodes=10, 
+    def loop(self, env, agent, database, n_episodes=10, train=True,
             max_episode_steps=2000, train_each=1, update_database=True, 
             render=False, store_video=False, wandb_project=False, 
-            save_model=True, save_model_each=50, MODEL_PATH=''):
+            save_model=True, save_model_each=50, MODEL_PATH='', 
+            save_step_each=2, greedy_sampling=False, initialization=True,
+            init_buffer_size=500):
 
         if store_video:
-            video = cv2.VideoWriter(video_folder+env.spec.id+'.avi', 0, 40, (168,84))
+            video = cv2.VideoWriter(video_folder+env.spec.id+'.avi', 0, 40, (256, 256+128))
 
+        initialized = not initialization
         returns = []
         for episode in range(0, n_episodes):
             step_counter = 0
@@ -37,33 +40,43 @@ class Trainer:
                                                 done, next_state['inner_state'])
 
                 elif self._train_level == 2:
-                    skill = agent.sample_action(state)
+                    if initialized:
+                        skill = agent.sample_action(state, explore=(not greedy_sampling))
+                    else:
+                        skill = np.random.randint(agent._n_actions)
                     next_state, reward, done, info = self.second_level_step(env, agent, state, skill)
                     step = PixelExperienceSecondLevel(state['inner_state'], state['outer_state'], 
                                                     skill, reward, done, next_state['inner_state'], 
                                                     next_state['outer_state'])                    
                 
                 if store_video:
-                    img = (np.swapaxes(np.swapaxes(state['outer_state'], 0, 2), 0, 1) * 255.0).astype(np.uint8)
+                    img_1 = env.sim.render(width=256, height=128, depth=False, camera_name='front_camera')[::-1,:,:]
+                    img_2 = env.sim.render(width=256, height=256, depth=False, camera_name='global_camera')[::-1,:,:]
+                    #assert img_1.shape == img_2.shape, 'Incompatible dimensions: img1:' + str(img_1.shape) + ', img2:' + str(img_2.shape)
+                    img = np.concatenate((img_1, img_2), axis=0)
                     video.write(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-                database.append(step)
+                should_save_step = (step_counter % save_step_each) == 0
+                if should_save_step:
+                    database.append(step)
 
                 episode_return += reward
                 state = next_state.copy()
 
                 step_counter += 1
 
-                should_train_in_this_step = (step_counter % train_each) == 0 
+                should_train_in_this_step = train and ((step_counter % train_each) == 0) and initialized 
                 if should_train_in_this_step:
                     metrics = self.optimizer.optimize(agent, database)                    
                     if wandb_project and metrics is not None:
-                        metrics['episode'] = episode
                         metrics['step'] = step_counter
                         wandb.log(metrics)
 
                 if step_counter >= max_episode_steps or done:
                     episode_done = True
+                
+                initialized = initialized or (database.__len__() > init_buffer_size)
+
             returns.append(episode_return)
 
             if wandb_project:

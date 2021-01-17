@@ -148,10 +148,12 @@ class vision_Net(nn.Module):
             nn.ReLU()
         )
 
-        conv_out_size = get_conv_out(self.conv, [input_channels, height, width])
-        self.fc = nn.Linear(conv_out_size, latent_dim)
-        
         self.apply(weights_init_he)
+
+        conv_out_size = get_conv_out(self.conv, [input_channels, height, width])
+        self.fc = Linear_noisy(conv_out_size, latent_dim)
+        torch.nn.init.orthogonal_(self.fc.mean_weight, 0.01)
+        self.fc.mean_bias.data.zero_()
         
     def forward(self, x):
         conv_feat = self.conv(x)
@@ -203,8 +205,8 @@ class softmax_policy_Net(nn.Module):
         )        
         
         # self.logit_pipe.apply(weights_init_rnd)
-        # torch.nn.init.orthogonal_(self.logits_layer.weight, 0.01)
-        # self.logits_layer.bias.data.zero_()
+        torch.nn.init.orthogonal_(self.logits_layer.mean_weight, 0.01)
+        self.logits_layer.mean_bias.data.zero_()
         
     def forward(self, s):    
         logits = self.logit_pipe(s) 
@@ -281,7 +283,6 @@ class vision_actor_critic_Net(nn.Module):
         super().__init__()
 
         self.vision_net = vision_Net(latent_dim=latent_dim)
-        self.vision_net_target = vision_Net(latent_dim=latent_dim)
         self.actor_critic_net = discrete_actor_critic_Net(s_dim + latent_dim, n_actions)
     
     def forward(self, inner_state, outer_state):

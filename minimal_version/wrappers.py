@@ -14,5 +14,5 @@ class AntPixelWrapper(gym.ObservationWrapper):
         outer_state = obs['pixels'].astype(np.float) / 255.0
         outer_state = np.swapaxes(outer_state, 1, 2)
         state['outer_state'] = np.swapaxes(outer_state, 0, 1)
-        state['first_level_obs'] = obs['state'][2:]
+        state['first_level_obs'] = np.concatenate((obs['state'][2:-61],obs['state'][-60:]))
         return state

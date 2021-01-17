@@ -16,7 +16,7 @@ def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_lev
     return first_level_actor
 
 
-def create_second_level_agent(n_actions=3, first_level_s_dim=31, noop_action=True,
+def create_second_level_agent(n_actions=3, first_level_s_dim=32, noop_action=True,
                 agent_type='vision_actor_critic', device='cuda'):
     first_level_actor = load_first_level_actor(second_level_a_dim=n_actions)
     if agent_type == 'vision_actor_critic':
@@ -47,13 +47,13 @@ class Second_Level_Agent(nn.Module):
         first_level_output = self.first_level_actor(first_level_obs)
         return first_level_output, second_level_output 
     
-    def sample_action(self, state):
+    def sample_action(self, state, explore=True):
         inner_state, outer_state = self.observe_second_level_state(state)
         with torch.no_grad():
-            action = self.second_level_architecture.sample_action(inner_state, outer_state)            
+            action = self.second_level_architecture.sample_action(inner_state, outer_state, explore=explore)            
             return action
     
-    def sample_first_level_action(self, state, action):
+    def sample_first_level_action(self, state, action, explore=True):
         first_level_obs = self.observe_first_level_state(state)
         with torch.no_grad():
             # If skill selected correspond to the no-operation skill, then
@@ -62,7 +62,7 @@ class Second_Level_Agent(nn.Module):
                 first_level_action = np.zeros(self._first_level_a_dim)
             else:
                 first_level_action = self.first_level_actor.sample_action(
-                    first_level_obs, action)
+                    first_level_obs, action, explore=explore)
             return first_level_action
 
     def observe_state(self, state):
