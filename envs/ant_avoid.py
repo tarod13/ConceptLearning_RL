@@ -15,7 +15,7 @@ class AntAvoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  ctrl_cost_weight=5e-3,
                  contact_cost_weight=1e-4,
                  healthy_reward=0.0,
-                 dead_cost_weight=100,
+                 dead_cost_weight=50,
                  terminate_when_unhealthy=True,	
 		 		 alive_z_range=(0.2,1.0),
                  healthy_z_range=(0.2, 1.0),
@@ -27,7 +27,7 @@ class AntAvoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  sensor_span=0.8*np.pi,
                  sensor_range=6,
                  save_init_quaternion=True,
-                 catch_reward_weight=-20.0,
+                 catch_reward_weight=-10.0,
                  agent_object_spacing=3,
                  object_object_spacing=3.5,
                  room_length=21,
@@ -320,8 +320,8 @@ class AntAvoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         xy_velocity_before = self.xy_velocity.copy()
         self.do_simulation(action, self.frame_skip)
         xy_velocity_after = self.xy_velocity.copy()
-        # observation = self._get_obs()
-        wall_observation = self.get_current_maze_obs()[:self._n_rays] # observation[:self._n_rays]
+        observation = self._get_obs()
+        wall_observation = observation[-3*self._n_rays:-2*self._n_rays] 
         wall_near = wall_observation.max() > 0.95
         collision_detected = wall_near and np.dot(xy_velocity_before, xy_velocity_after) < 0.2 and (xy_velocity_before**2).sum() > 0.1   
         xy_acceleration = ((xy_velocity_after - xy_velocity_before)**2).sum() / self.dt
@@ -337,9 +337,8 @@ class AntAvoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         rewards = healthy_reward + forward_reward + gathering_reward
         costs = ctrl_cost + dead_cost + collision_cost
 
-        reward = rewards - costs
+        reward = (rewards - costs) * 0.2
         done = self.done
-        observation = self._get_obs()
         info = {}
 
         self._update_objects()
@@ -350,12 +349,12 @@ class AntAvoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         position = self.sim.data.qpos.flat.copy()
         velocity = self.sim.data.qvel.flat.copy()
         contact_force = self.contact_forces.flat.copy()
-        # maze_obs = self.get_current_maze_obs()
+        maze_obs = self.get_current_maze_obs()
 
         if self._exclude_current_positions_from_observation:
             position = position[2:]
 
-        observations = np.concatenate((position, velocity, self._init_quaternion)) #, maze_obs
+        observations = np.concatenate((position, velocity, self._init_quaternion, maze_obs))
 
         return observations
     
