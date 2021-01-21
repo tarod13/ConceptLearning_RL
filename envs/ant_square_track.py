@@ -14,10 +14,10 @@ DEFAULT_CAMERA_CONFIG = {
 class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self,
                  xml_file='ant_v2_square_track.xml',
-                 ctrl_cost_weight=5e-3,
-                 contact_cost_weight=1e-4,
-                 healthy_reward=0.0,
-                 dead_cost_weight=50,
+                 ctrl_cost_weight=1e-1,
+                 contact_cost_weight=0.0,
+                 healthy_reward=1e-1,
+                 dead_cost_weight=0.0,
                  terminate_when_unhealthy=True,
                  healthy_z_range=(0.2, 1.0),
                  contact_force_range=(-1.0, 1.0),
@@ -27,7 +27,8 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  n_rays=20,
                  sensor_span=np.pi*0.8,
                  sensor_range=6,
-                 save_init_quaternion=True):
+                 save_init_quaternion=True,
+                 update_quaternion_each=5):
         utils.EzPickle.__init__(**locals())
 
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -59,6 +60,9 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self._save_init_quaternion = save_init_quaternion
 
         self._obstacle_types = [0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+        self._step_counter = 0
+        self._update_quaternion_each = update_quaternion_each
 
         mujoco_env.MujocoEnv.__init__(self, xml_file, 5)  
         
@@ -150,9 +154,9 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def xy_velocity(self):
         return self.sim.data.qvel.flat.copy()[:2]
 
-    def velocity_reward(self):
-        speed = np.dot(self.xy_velocity, self.xy_velocity)**0.5
-        velocity_direction = self.xy_velocity / speed
+    def velocity_reward(self, xy_velocity):
+        speed = np.dot(xy_velocity, xy_velocity)**0.5
+        velocity_direction = xy_velocity / speed
         similarity = np.dot(velocity_direction, self.xy_orientation)
         similarity_2 = np.dot(self.xy_orientation_init(), self.xy_orientation)
         similarity_3 = np.dot(velocity_direction, self.xy_orientation_init())
@@ -188,7 +192,7 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def contact_forces(self):
         raw_contact_forces = self.sim.data.cfrc_ext
         min_value, max_value = self._contact_force_range
-        contact_forces = raw_contact_forces / 40 # np.clip(raw_contact_forces, min_value, max_value)
+        contact_forces = np.clip(raw_contact_forces, min_value, max_value)
         return contact_forces
 
     @property
@@ -210,28 +214,30 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         return done
 
     def step(self, action):
-        xy_velocity_before = self.xy_velocity.copy()
+        xy_position_before = self.get_body_com("torso")[:2].copy()
         self.do_simulation(action, self.frame_skip)
-        xy_velocity_after = self.xy_velocity.copy()
+        xy_position_after = self.get_body_com("torso")[:2].copy()
+        xy_velocity = (xy_position_after - xy_position_before) / self.dt
         observation = self._get_obs()
-        wall_observation = observation[-3*self._n_rays:-2*self._n_rays] 
-        wall_near = wall_observation.max() > 0.95
-        collision_detected = wall_near and np.dot(xy_velocity_before, xy_velocity_after) < 0.2 and (xy_velocity_before**2).sum() > 0.1   
-        xy_acceleration = ((xy_velocity_after - xy_velocity_before)**2).sum() / self.dt
         
         ctrl_cost = self.control_cost(action)        
         dead_cost = self.dead_cost
-        collision_cost = min((int(collision_detected) * xy_acceleration), 100)
+        contact_cost = self.contact_cost
 
-        forward_reward = self.velocity_reward()
+        forward_reward = self.velocity_reward(xy_velocity)
         healthy_reward = self.healthy_reward
         
         rewards = healthy_reward + forward_reward
-        costs = ctrl_cost + dead_cost + collision_cost
+        costs = ctrl_cost + dead_cost + contact_cost
 
         reward = (rewards - costs) * 0.2
         done = self.done
         info = {}
+
+        self._step_counter += 1
+        should_update_quaternion = (self._step_counter % self._update_quaternion_each) == 0
+        if should_update_quaternion:
+            self._update_quaternion()
 
         return observation, reward, done, info
 
@@ -239,7 +245,7 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         position = self.sim.data.qpos.flat.copy()
         velocity = self.sim.data.qvel.flat.copy()
         contact_force = self.contact_forces.flat.copy()
-        maze_obs = self.get_current_maze_obs()
+        maze_obs = np.zeros(3*self._n_rays+1)
 
         if self._exclude_current_positions_from_observation:
             position = position[2:]
@@ -271,6 +277,7 @@ class AntSquareTrackEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             self.model.nv)
         self.set_state(qpos, qvel)
 
+        self._step_counter = 0
         self._init_quaternion = self.sim.data.qpos[3:7].copy()
         self._goal_readings = np.zeros(self._n_rays)
         self._goal_sizes = np.zeros(self._n_rays)
