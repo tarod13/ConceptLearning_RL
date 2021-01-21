@@ -1,6 +1,7 @@
 import collections
 import numpy as np
 import torch
+import random
 
 ExperienceFirstLevel = collections.namedtuple(
     'Experience', field_names=['state', 'action', 'reward', 'done', 'next_state'])
@@ -8,10 +9,11 @@ PixelExperienceSecondLevel = collections.namedtuple(
     'Experience', field_names=['inner_state', 'outer_state', 'action', 'reward', 
                                 'done', 'next_inner_state', 'next_outer_state'])
 
-class PixelExperienceBuffer:
+class ExperienceBuffer:
     def __init__(self, capacity, level=1):
         self.buffer = collections.deque(maxlen=capacity)
         self._level = level
+        self._capacity = capacity
 
         assert (level == 1) or (level == 2), 'Invalid level. Must be 1 or 2.'
 
@@ -20,6 +22,10 @@ class PixelExperienceBuffer:
 
     def append(self, experience):
         self.buffer.append(experience)
+        # i = random.randrange(self.__len__())
+        # head = self.buffer[0]
+        # self.buffer[0] = self.buffer[i]
+        # self.buffer[i] = head
 
     def sample_numpy(self, batch_size):
         indices = np.random.choice(len(self.buffer), batch_size,
@@ -38,11 +44,11 @@ class PixelExperienceBuffer:
                 dones, next_inner_states, next_outer_states = \
                 zip(*[self.buffer[idx] for idx in indices])
 
-            return np.array(inner_states), np.array(outer_states), \
+            return np.array(inner_states), np.array(outer_states, dtype=np.uint8), \
                 np.array(actions, dtype=np.uint8), \
                 np.array(rewards, dtype=np.float32), \
                 np.array(dones, dtype=np.uint8), \
-                np.array(next_inner_states), np.array(next_outer_states)
+                np.array(next_inner_states), np.array(next_outer_states, dtype=np.uint8)
 
     
     def sample(self, batch_size, to_torch=True, dev_name='cuda'):
@@ -70,10 +76,12 @@ class PixelExperienceBuffer:
             if to_torch:
                 device = torch.device(dev_name)
                 inner_states_th = torch.FloatTensor(inner_states).to(device)
+                outer_states = outer_states.astype(np.float)/255.
                 outer_states_th = torch.FloatTensor(outer_states).to(device)
                 rewards_th = torch.FloatTensor(rewards).view(-1,1).to(device)
                 dones_th = torch.ByteTensor(dones).view(-1,1).float().to(device)
                 next_inner_states_th = torch.FloatTensor(next_inner_states).to(device)
+                next_outer_states = next_outer_states.astype(np.float)/255.
                 next_outer_states_th = torch.FloatTensor(next_outer_states).to(device)
                 return inner_states_th, outer_states_th, actions.astype('int'), rewards_th, \
                     dones_th, next_inner_states_th, next_outer_states_th

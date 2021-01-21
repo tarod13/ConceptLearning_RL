@@ -28,7 +28,11 @@ class parallel_Linear(nn.Module):
             bias = self.bias
         else:
             weight, bias = vars_
-        return torch.einsum('ijk,jlk->ijl', input, weight) + bias.unsqueeze(0)
+        if len(input.shape) == 2:
+            input_shape = 'ik'            
+        else:
+            input_shape = 'ijk'
+        return torch.einsum(input_shape+',jlk->ijl', input, weight) + bias.unsqueeze(0)
 
     def conditional(self, input, given):
         return torch.einsum('ik,lk->il', input, self.weight[given,:,:]) + self.bias[given,:].unsqueeze(0) 

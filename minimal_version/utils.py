@@ -42,3 +42,9 @@ def time_stamp():
     time_in_seconds = time.time()
     stamp = datetime.datetime.fromtimestamp(time_in_seconds).strftime('%Y-%m-%d_%H-%M-%S')
     return stamp
+
+def cat_state_task(observation):
+    state = observation['state']
+    task = observation['task']
+    obs = np.concatenate((state, task))
+    return obs

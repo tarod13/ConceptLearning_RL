@@ -3,10 +3,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from nets import s_Net, vision_actor_critic_Net
+from policy_nets import s_Net
+from actor_critic_nets import vision_actor_critic_Net, vision_actor_critic_with_baselines_Net
 from net_utils import freeze
 from utils import numpy2torch as np2torch
 from utils import time_stamp
+
 
 def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_level_a_dim=8, 
                 first_level_actor_path="/home/researcher/Diego/Concept_Learning_Ant/Test/19/102_actor_sl.pt"):
@@ -16,11 +18,15 @@ def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_lev
     return first_level_actor
 
 
-def create_second_level_agent(n_actions=3, first_level_s_dim=32, noop_action=True,
-                agent_type='vision_actor_critic', device='cuda'):
+def create_second_level_agent(n_actions=3, first_level_s_dim=32, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
+                agent_type='vision_actor_critic', device='cuda', noisy=True):
     first_level_actor = load_first_level_actor(second_level_a_dim=n_actions)
     if agent_type == 'vision_actor_critic':
-        second_level_architecture = vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action))
+        second_level_architecture = vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action),
+                                                            n_heads, init_log_alpha=init_log_alpha, 
+                                                            latent_dim=latent_dim, noisy=noisy)
+    elif agent_type == 'vision_actor_critic_with_baselines':
+        second_level_architecture = vision_actor_critic_with_baselines_Net(first_level_s_dim, n_actions+int(noop_action), noisy=noisy)
     else:
         raise RuntimeError('Unkown agent type')
     second_level_agent = Second_Level_Agent(n_actions, second_level_architecture, first_level_actor, noop_action).to(device)
@@ -42,16 +48,13 @@ class Second_Level_Agent(nn.Module):
         self._id = time_stamp()
     
     def forward(self, states):
-        inner_state, outer_state, first_level_obs = self.observe_state(state)
-        second_level_output = self.second_level_architecture(inner_state, outer_state)
-        first_level_output = self.first_level_actor(first_level_obs)
-        return first_level_output, second_level_output 
+        pass 
     
     def sample_action(self, state, explore=True):
         inner_state, outer_state = self.observe_second_level_state(state)
         with torch.no_grad():
-            action = self.second_level_architecture.sample_action(inner_state, outer_state, explore=explore)            
-            return action
+            action, dist = self.second_level_architecture.sample_action(inner_state, outer_state, explore=explore)            
+            return action, dist
     
     def sample_first_level_action(self, state, action, explore=True):
         first_level_obs = self.observe_first_level_state(state)
@@ -72,7 +75,7 @@ class Second_Level_Agent(nn.Module):
 
     def observe_second_level_state(self, state):
         inner_state_np = state['inner_state']
-        outer_state_np = state['outer_state']        
+        outer_state_np = state['outer_state'].astype(np.float)/255.        
         inner_state, outer_state = np2torch(inner_state_np), np2torch(outer_state_np)        
         return inner_state, outer_state
     
