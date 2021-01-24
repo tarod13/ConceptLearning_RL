@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import Adam
 
 from custom_layers import Linear_noisy, parallel_Linear
+from vision_nets import vision_Net
 from net_utils import *
 
 use_cuda = torch.cuda.is_available()
@@ -85,7 +87,7 @@ class multihead_dueling_q_Net(nn.Module):
         self.n_actions = n_actions
 
         self.l1 = parallel_Linear(n_heads, s_dim, 256)
-        self.l2 = parallel_Linear(n_heads, 256, 256)
+        # self.l2 = parallel_Linear(n_heads, 256, 256)
         self.lV = parallel_Linear(n_heads, 256, 1)
         self.lA = parallel_Linear(n_heads, 256, n_actions)
         
@@ -97,7 +99,29 @@ class multihead_dueling_q_Net(nn.Module):
         
     def forward(self, s):        
         x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
+        #x = F.relu(self.l2(x))
+        V = self.lV(x)        
+        A = self.lA(x)
+        Q = V + A - A.mean(2, keepdim=True) 
+        return Q
+
+
+class vision_multihead_dueling_q_Net(multihead_dueling_q_Net):
+    def __init__(self, s_dim, latent_dim, n_actions, n_heads, lr=1e-4):
+        super().__init__(s_dim + latent_dim, n_actions, n_heads)
+        self.vision_nets = nn.ModuleList([vision_Net(latent_dim=latent_dim, 
+            noisy=False) for i in range(0, n_heads)])
+        self._n_heads = n_heads
+        
+        self.optimizer = Adam(self.parameters(), lr=lr)
+        
+    def forward(self, inner_state, outer_state):    
+        state = []
+        for head in range(0, self._n_heads):
+            head_features = self.vision_nets[head](outer_state)
+            state.append(torch.cat([inner_state, head_features], dim=1))
+        state = torch.stack(state, dim=1)
+        x = F.relu(self.l1(state))
         V = self.lV(x)        
         A = self.lA(x)
         Q = V + A - A.mean(2, keepdim=True) 

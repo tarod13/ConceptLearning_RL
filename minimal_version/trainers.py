@@ -88,11 +88,11 @@ class First_Level_Trainer:
                 wandb.log({'episode': episode, 'return': episode_return})
 
             if save_model and ((episode + 1) % save_model_each == 0):
-                agent.save(MODEL_PATH)            
+                agent.save(MODEL_PATH + env.spec.id + '/')            
                         
             if train and (episode_return > best_return):
                 best_return = episode_return
-                agent.save(MODEL_PATH + 'best_')
+                agent.save(MODEL_PATH + env.spec.id + '/', best=True)
 
         return_array = np.array(returns)
 
@@ -109,12 +109,12 @@ class Second_Level_Trainer:
         else:
             self.optimizer = Second_Level_SAC_with_baselines_PolicyOptimizer(**optimizer_kwargs)
         
-    def loop(self, env, agent, database, n_episodes=10, train=True,
+    def loop(self, env, agents, database, n_episodes=10, train=True,
             max_episode_steps=2000, train_each=1, update_database=True, 
             render=False, store_video=False, wandb_project=False, 
             save_model=True, save_model_each=50, MODEL_PATH='', 
             save_step_each=2, greedy_sampling=False, initialization=True,
-            init_buffer_size=500, n_step_td=2):
+            init_buffer_size=500, n_step_td=2, eval_each=10):
 
         best_return = -np.infty
 
@@ -137,11 +137,11 @@ class Second_Level_Trainer:
 
             while not episode_done:
                 if initialized:
-                    skill, dist = agent.sample_action(state, explore=(not greedy_sampling))
+                    skill, dist = agents[-1].sample_action(state, explore=(not greedy_sampling))
                 else:
-                    skill = np.random.randint(agent._n_actions)
-                    dist = np.ones(agent._n_actions) / agent._n_actions
-                next_state, reward, done, info = self.second_level_step(env, agent, state, skill)
+                    skill = np.random.randint(agents[-1]._n_actions)
+                    dist = np.ones(agents[-1]._n_actions) / agents[-1]._n_actions
+                next_state, reward, done, info = self.second_level_step(env, agents[-1], state, skill)
 
                 action_buffer.append(skill)
                 reward_buffer.append(reward)
@@ -151,7 +151,7 @@ class Second_Level_Trainer:
                 if entropy_baseline is None:
                     entropy_baseline = entropy
                 entropy_difference = entropy - entropy_baseline
-                alpha = agent.second_level_architecture.get_alpha()
+                alpha = agents[-1].second_level_architecture.get_alpha()
                 gamma_n = gamma = self.optimizer.discount_factor
                 for previous_step in range(0, len(reward_buffer)-1):
                     reward_buffer[-2-previous_step] += gamma_n * (reward + alpha * entropy_difference)
@@ -167,7 +167,7 @@ class Second_Level_Trainer:
                     video.write(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
                 buffer_ready = len(state_buffer) == n_step_td
-                if buffer_ready:
+                if buffer_ready and update_database:
                     initial_state = state_buffer[0]
                     initial_skill = action_buffer[0]
                     n_step_reward = reward_buffer[0]                    
@@ -187,7 +187,8 @@ class Second_Level_Trainer:
 
                 should_train_in_this_step = train and ((step_counter % train_each) == 0) and initialized 
                 if should_train_in_this_step:
-                    metrics = self.optimizer.optimize(agent, database, n_step_td)                    
+                    metrics = self.optimizer.optimize(agents, database, n_step_td)
+                    #agents.append(agent_last)                    
                     if wandb_project and metrics is not None:
                         metrics['step'] = step_counter
                         wandb.log(metrics)
@@ -199,15 +200,23 @@ class Second_Level_Trainer:
 
             returns.append(episode_return)
 
-            if wandb_project:
+            if wandb_project and train:
                 wandb.log({'episode': episode, 'return': episode_return})
 
             if save_model and ((episode + 1) % save_model_each == 0):
-                agent.save(MODEL_PATH)
+                agents[-1].save(MODEL_PATH + env.spec.id + '/')
             
             if train and (episode_return > best_return):
                 best_return = episode_return
-                agent.save(MODEL_PATH + 'best_')
+                agents[-1].save(MODEL_PATH + env.spec.id + '/', best=True)
+            
+            if train and ((episode+1) % eval_each == 0):
+                eval_returns = self.loop(env, agents, None, n_episodes=10, train=False, 
+                    max_episode_steps=max_episode_steps, update_database=False,
+                    render=False, store_video=False, wandb_project=wandb_project,
+                    save_model=False, greedy_sampling=True, initialization=False,
+                    n_step_td=1)
+                wandb.log({'episode_eval': episode//eval_each, 'eval_return': eval_returns.mean()})
 
         return_array = np.array(returns)
 
@@ -232,6 +241,7 @@ class Second_Level_Trainer:
             finished_loop = loop_done or ((first_level_step_counter % n_steps) == 0)
             state = next_state.copy()  
 
-        return next_state, loop_reward, loop_done, info            
+        return next_state, loop_reward, loop_done, info     
+
 
 

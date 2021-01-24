@@ -22,7 +22,7 @@ def vectorized_multinomial(prob_matrix):
     k = (s < r).sum(axis=1)
     return items[k]
 
-def one_hot_embedding(labels, num_classes):
+def one_hot_embedding(labels, num_classes, device='cuda'):
     y = torch.eye(num_classes).to(device) 
     return y[labels]
 

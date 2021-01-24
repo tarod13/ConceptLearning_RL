@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
-import copy
+
 
 class Optimizer:
     def __init__(self, lr=3e-4):
@@ -240,8 +240,7 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
                 n_actions=4, init_epsilon=1.0, min_epsilon=0.4, 
                 delta_epsilon=2.5e-7, entropy_factor=0.95,
                 weight_q_loss = 0.05, lr_alpha=3e-4,
-                lr=3e-5, entropy_update_rate=0.05, 
-                alpha_v_weight=0.1
+                lr=3e-5, entropy_update_rate=0.05
                 ):
         super().__init__()
         self.learn_alpha = learn_alpha
@@ -255,10 +254,8 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
         self.weight_q_loss = weight_q_loss
         self.lr = lr
         self.lr_alpha = lr_alpha
-        self.alpha_v_weight = alpha_v_weight
         self.entropy_update_rate = entropy_update_rate
         self.H_mean = None
-        self.past_H_mean = None
     
     def optimize(self, agents, database, n_step_td=1): 
         if database.__len__() < self.batch_size:
@@ -273,29 +270,33 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
         q_target = 0.0
         log_softmax_target = 0.0
         HA_s_mean = 0.0
-        for i in range(0, n_agents-1):
-            q_target_i, log_softmax_target_i, HA_s_mean_i = \
-                self.calculate_targets(agents[i], n_step_td, inner_states, 
-                                    outer_states, actions, rewards, dones, 
-                                    next_inner_states, next_outer_states)
-            q_target += (q_target_i - q_target)/(i+1)
-            log_softmax_target += (log_softmax_target_i - log_softmax_target)/(i+1)
-            HA_s_mean += (HA_s_mean_i - HA_s_mean)/(i+1)
+        # for i in range(0, n_agents-1):
+        #     q_target_i, log_softmax_target_i, HA_s_mean_i = \
+        #         self.calculate_targets(agents[i], inner_states, outer_states, 
+        #                             actions, rewards, dones, next_inner_states, 
+        #                             next_outer_states)
+        #     q_target += (q_target_i - q_target)/(i+1)
+        #     log_softmax_target += (log_softmax_target_i - log_softmax_target)/(i+1)
+        #     HA_s_mean += (HA_s_mean_i - HA_s_mean)/(i+1)
 
         agent = copy.deepcopy(agents[-1])
+        # agent = agents[-1]
 
         # Alias for actor-critic module
         actor_critic = agent.second_level_architecture
 
         # Calculate q-values and action likelihoods
-        q, next_q, next_PA_s, next_log_PA_s, log_alpha = \
-            actor_critic.evaluate_critic(inner_states, outer_states,
-                                next_inner_states, next_outer_states)
+        q, _, PA_s, log_PA_s, log_alpha = \
+            actor_critic(inner_states, outer_states)
 
+        _, next_q, next_PA_s, log_next_PA_s, _ = \
+            actor_critic(next_inner_states, next_outer_states)
+        
         alpha = log_alpha.exp().item()
 
         # Calculate entropy of the action distributions
-        HA_s = -(next_PA_s * next_log_PA_s).sum(1, keepdim=True)
+        PA = PA_s.mean(0, keepdim=True)
+        HA_s = -(PA_s * log_PA_s).sum(1, keepdim=True)
         HA_s_mean_last = HA_s.detach().mean()
         HA_s_mean += (HA_s_mean_last - HA_s_mean)/n_agents
 
@@ -306,19 +307,19 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
             self.H_mean = HA_s_mean.item() * self.entropy_update_rate + self.H_mean * (1.0-self.entropy_update_rate)
         
         # Choose minimum next q-value to avoid overestimation of target
-        if not actor_critic._parallel:
+        if not actor_critic.actor_critic_net._parallel:
             next_q_target = torch.min(next_q[0], next_q[1])
         else:
             next_q_target = next_q.min(1)[0]
 
         # Calculate next v-value, exactly, with the next action distribution
-        next_v_target = (next_PA_s * (next_q_target - alpha * (next_log_PA_s + self.H_mean))).sum(1, keepdim=True)
+        next_v_target = (next_PA_s * (next_q_target - alpha * (log_next_PA_s + self.H_mean))).sum(1, keepdim=True)
 
         # Estimate q-value target by sampling Bellman expectation
         q_target_last = rewards + self.discount_factor**n_step_td * next_v_target * (1.-dones)
         q_target += (q_target_last - q_target)/n_agents
 
-        if not actor_critic._parallel:
+        if not actor_critic.actor_critic_net._parallel:
             # Select q-values corresponding to the action taken
             q1_A = q[0][np.arange(self.batch_size), actions].view(-1,1)
             q2_A = q[1][np.arange(self.batch_size), actions].view(-1,1)
@@ -327,27 +328,18 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
             q1_loss = (q1_A - q_target.detach()).pow(2).mean()
             q2_loss = (q2_A - q_target.detach()).pow(2).mean()
             q_loss = q1_loss + q2_loss
+
+            # Choose mean q-value to avoid overestimation
+            q_dist = torch.min(q[0], q[1])
+
         else:
             # Select q-values corresponding to the action taken
             q_A = q[np.arange(self.batch_size),:,actions].view(q.shape[0],q.shape[1],1)
 
             # Calculate losses for both critics as the quadratic TD errors
             q_loss = (q_A - q_target.unsqueeze(1).detach()).pow(2).mean()
-
-        # Create critic optimizer and optimize model
-        actor_critic.q.optimizer.zero_grad()
-        q_loss.backward()
-        clip_grad_norm_(actor_critic.q.parameters(), self.clip_value)
-        actor_critic.q.optimizer.step()    
-        
-        # Calculate q-values and action likelihoods after critic SGD
-        q, PA_s, log_PA_s = actor_critic.evaluate_actor(
-            inner_states, outer_states)
-
-        # Choose mean q-value to avoid overestimation
-        if not actor_critic._parallel:            
-            q_dist = torch.min(q[0], q[1])
-        else:
+            
+            # Choose mean q-value to avoid overestimation
             q_dist = q.min(1)[0]
 
         # Calculate normalizing factors for target softmax distributions
@@ -359,47 +351,50 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
         
         # Calculate actor losses as the KL divergence between action 
         # distributions and softmax target distributions
-        difference_ratio = alpha * (log_PA_s - log_softmax_target).detach()
+        difference_ratio = log_PA_s - log_softmax_target.detach()
         actor_loss = (PA_s * difference_ratio).sum(1, keepdim=True).mean()
 
+        # Calculate total loss
+        loss = q_loss*self.weight_q_loss + actor_loss
+
         # Create optimizer and optimize model
-        actor_critic.actor.optimizer.zero_grad()
-        actor_loss.backward()
-        clip_grad_norm_(actor_critic.actor.parameters(), self.clip_value)
-        actor_critic.actor.optimizer.step()
+        optimizer = optim.Adam(agent.parameters(), lr=self.lr)  
+        optimizer.zero_grad()
+        loss.backward()
+        clip_grad_norm_(agent.parameters(), self.clip_value)
+        optimizer.step()
 
         # Calculate loss for temperature parameter alpha 
         scaled_min_entropy = self.min_entropy * self.epsilon
-        alpha_error = (HA_s_mean - scaled_min_entropy).mean()
-        alpha_loss = log_alpha * alpha_error.detach()
+        alpha_loss = log_alpha * (HA_s_mean - scaled_min_entropy).mean().detach()
 
         # Optimize temperature (if it is learnable)
         if self.learn_alpha:
             # Create optimizer and optimize model
-            actor_critic.alpha_optimizer.zero_grad()
+            optimizer_alpha = optim.Adam([actor_critic.actor_critic_net.log_alpha], lr=self.lr)  
+            optimizer_alpha.zero_grad()
             alpha_loss.backward()
-            clip_grad_norm_([actor_critic.log_alpha], self.clip_value)
-            actor_critic.alpha_optimizer.step()        
+            clip_grad_norm_([actor_critic.actor_critic_net.log_alpha], self.clip_value)
+            optimizer_alpha.step()        
 
         # Update targets of actor-critic and temperature param.
         actor_critic.update()
 
         # Anneal epsilon
-        self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])   
+        self.epsilon = np.max([self.epsilon - self.delta_epsilon, self.min_epsilon])    
 
-        agents.append(agent) 
-
-        metrics = {'q_loss': q_loss.item(),
+        metrics = {'loss': loss.item(),
+                    'q_loss': q_loss.item(),
                     'actor_loss': actor_loss.item(),
                     'alpha_loss': alpha_loss.item(),
                     'SAC_epsilon': self.epsilon,
                     'alpha': alpha,
-                    'base_entropy': self.H_mean,
+                    'base_entropy': self.H_mean
                     }
 
-        return metrics
-
-    def calculate_targets(self, agent, n_step_td, inner_states, outer_states, 
+        return metrics  
+    
+    def calculate_targets(self, agent, inner_states, outer_states, 
         actions, rewards, dones, next_inner_states, next_outer_states):
 
         # Alias for actor-critic module
@@ -407,30 +402,33 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
 
         with torch.no_grad():
             # Calculate q-values and action likelihoods
-            q, next_q, next_PA_s, next_log_PA_s, log_alpha = \
-                actor_critic.evaluate_critic(inner_states, outer_states, 
-                    next_inner_states, next_outer_states)
+            q, _, PA_s, log_PA_s, log_alpha = \
+                actor_critic(inner_states, outer_states)
+
+            _, next_q, next_PA_s, log_next_PA_s, _ = \
+                actor_critic(next_inner_states, next_outer_states)
             
             alpha = log_alpha.exp().item()
 
             # Calculate entropy of the action distributions
-            HA_s = -(next_PA_s * next_log_PA_s).sum(1, keepdim=True)
+            PA = PA_s.mean(0, keepdim=True)
+            HA_s = -(PA_s * log_PA_s).sum(1, keepdim=True)
             HA_s_mean = HA_s.detach().mean()
             
             # Choose minimum next q-value to avoid overestimation of target
-            if not actor_critic._parallel:
+            if not actor_critic.actor_critic_net._parallel:
                 next_q_target = torch.min(next_q[0], next_q[1])
             else:
                 next_q_target = next_q.min(1)[0]
 
             # Calculate next v-value, exactly, with the next action distribution
-            next_v_target = (next_PA_s * (next_q_target - alpha * (next_log_PA_s + self.H_mean))).sum(1, keepdim=True)
+            next_v_target = (next_PA_s * (next_q_target - alpha * (log_next_PA_s + self.H_mean))).sum(1, keepdim=True)
 
             # Estimate q-value target by sampling Bellman expectation
             q_target = rewards + self.discount_factor**n_step_td * next_v_target * (1.-dones)
 
             # Choose mean q-value to avoid overestimation
-            if not actor_critic._parallel:
+            if not actor_critic.actor_critic_net._parallel:
                 q_dist = torch.min(q[0], q[1])
             else:
                 q_dist = q.min(1)[0]
@@ -441,7 +439,8 @@ class Second_Level_SAC_PolicyOptimizer(Optimizer):
             # Calculate the target log-softmax distribution
             log_softmax_target = q_dist/(alpha+1e-10) - z
             
-            return q_target, log_softmax_target, HA_s_mean
+            targets = (q_target, log_softmax_target, HA_s_mean)
+            return targets
 
 
 class Second_Level_SAC_with_baselines_PolicyOptimizer(Optimizer):

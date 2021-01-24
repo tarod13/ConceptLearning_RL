@@ -11,6 +11,8 @@ from wrappers import AntPixelWrapper
 
 import wandb
 import argparse
+import os
+import collections
 
 DEFAULT_ENV_NAME = 'AntSquareWall-v3'
 DEFAULT_N_STEPS_IN_SECOND_LEVEL_EPISODE = 600
@@ -18,7 +20,7 @@ DEFAULT_BUFFER_SIZE = 200000
 DEFAULT_N_EPISODES = 1500
 DEFAULT_ID = '2001-01-15_19-10-56'
 DEFAULT_CLIP_VALUE = 10.0
-DEFAULT_CONTROL_COST = 1e-1
+DEFAULT_CONTROL_COST = 2e-1
 DEFAULT_COLLISION_DETECTION = False
 DEFAULT_CONTACT_COST = 0.0
 DEFAULT_HEALTHY_REWARD = 1.0e-1
@@ -28,21 +30,25 @@ DEFAULT_BATCH_SIZE = 64
 DEFAULT_MIN_EPSILON = 1.0
 DEFAULT_INIT_EPSILON = 1.0
 DEFAULT_DELTA_EPSILON = 0.0
-DEFAULT_ENTROPY_FACTOR = 0.5
-DEFAULT_ENTROPY_UPDATE_RATE = 0.1
+DEFAULT_ENTROPY_FACTOR = 0.015
+DEFAULT_ENTROPY_UPDATE_RATE = 0.005
 DEFAULT_WEIGHT_Q_LOSS = 0.5
-DEFAULT_WEIGHT_ALPHA_LOSS = 10.0
-DEFAULT_INIT_LOG_ALPHA = np.log(0.04)
+DEFAULT_INIT_LOG_ALPHA = np.log(1)
 DEFAULT_LR = 1e-4
+DEFAULT_LR_ALPHA = 1e-4
+DEFAULT_ALPHA_V_WEIGHT = 0
 DEFAULT_INITIALIZATION = False
 DEFAULT_INITIAL_BUFFER_SIZE = 500
-DEFAULT_NOISY_ACTOR_CRITIC = True
+DEFAULT_NOISY_ACTOR_CRITIC = False
 DEFAULT_SAVE_STEP_EACH = 1
 DEFAULT_TRAIN_EACH = 8
 DEFAULT_N_STEP_TD = 1
 DEFAULT_USE_SAC_BASELINES = False
+DEFAULT_PARALLEL_Q_NETS = True
 DEFAULT_N_HEADS = 2
-DEFAULT_VISION_LATENT_DIM = 256
+DEFAULT_VISION_LATENT_DIM = 512
+DEFAULT_N_AGENTS = 1
+
 
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
@@ -62,9 +68,10 @@ if __name__ == "__main__":
     parser.add_argument("--entropy_factor", default=DEFAULT_ENTROPY_FACTOR, help="Entropy coefficient, default=" + str(DEFAULT_ENTROPY_FACTOR))
     parser.add_argument("--entropy_update_rate", default=DEFAULT_ENTROPY_UPDATE_RATE, help="Mean entropy update rate, default=" + str(DEFAULT_ENTROPY_UPDATE_RATE))
     parser.add_argument("--weight_q_loss", default=DEFAULT_WEIGHT_Q_LOSS, help="Weight of critics' loss, default=" + str(DEFAULT_WEIGHT_Q_LOSS))
-    parser.add_argument("--weight_alpha_loss", default=DEFAULT_WEIGHT_ALPHA_LOSS, help="Weight of temperature loss, default=" + str(DEFAULT_WEIGHT_ALPHA_LOSS))
     parser.add_argument("--init_log_alpha", default=DEFAULT_INIT_LOG_ALPHA, help="Initial temperature parameter, default=" + str(DEFAULT_INIT_LOG_ALPHA))
     parser.add_argument("--lr", default=DEFAULT_LR, help="Learning rate, default=" + str(DEFAULT_LR))
+    parser.add_argument("--lr_alpha", default=DEFAULT_LR_ALPHA, help="Learning rate for temperature, default=" + str(DEFAULT_LR_ALPHA))
+    parser.add_argument("--alpha_v_weight", default=DEFAULT_ALPHA_V_WEIGHT, help="Weight for entropy velocity in temperature loss, default=" + str(DEFAULT_ALPHA_V_WEIGHT))
     parser.add_argument("--initialization", default=DEFAULT_INITIALIZATION, help="Initialize the replay buffer of the agent by acting randomly for a specified number of steps ")
     parser.add_argument("--init_buffer_size", default=DEFAULT_INITIAL_BUFFER_SIZE, help="Minimum replay buffer size to start learning, default=" + str(DEFAULT_INITIAL_BUFFER_SIZE))
     parser.add_argument("--load_id", default=None, help="Model ID to load, default=None")
@@ -73,9 +80,11 @@ if __name__ == "__main__":
     parser.add_argument("--save_step_each", default=DEFAULT_SAVE_STEP_EACH, help="Number of steps to store 1 step in the replay buffer, default=" + str(DEFAULT_SAVE_STEP_EACH))
     parser.add_argument("--train_each", default=DEFAULT_TRAIN_EACH, help="Number of steps ellapsed to train once, default=" + str(DEFAULT_TRAIN_EACH))
     parser.add_argument("--n_step_td", default=DEFAULT_N_STEP_TD, help="Number of steps to calculate temporal differences, default=" + str(DEFAULT_N_STEP_TD))
+    parser.add_argument("--parallel_q_nets", default=DEFAULT_PARALLEL_Q_NETS, help="Use or not parallel q nets in actor critic, default=" + str(DEFAULT_PARALLEL_Q_NETS))
     parser.add_argument("--n_heads", default=DEFAULT_N_HEADS, help="Number of heads in the critic, default=" + str(DEFAULT_N_HEADS))
     parser.add_argument("--sac_baselines", default=DEFAULT_USE_SAC_BASELINES, help="Use SAC baselines if flag is given")
     parser.add_argument("--clip_value", default=DEFAULT_CLIP_VALUE, help="Clip value for optimizer")
+    parser.add_argument("--n_agents", default=DEFAULT_N_AGENTS, type=int, help="Number of agents")
     parser.add_argument("--vision_latent_dim", default=DEFAULT_VISION_LATENT_DIM, help="Dimensionality of feature vector added to inner state, default=" + 
         str(DEFAULT_VISION_LATENT_DIM))
     args = parser.parse_args()
@@ -107,8 +116,9 @@ if __name__ == "__main__":
         'delta_epsilon': args.delta_epsilon,
         'entropy_factor': args.entropy_factor,
         'weight_q_loss': args.weight_q_loss,
-        'weight_alpha_loss': args.weight_alpha_loss,
         'lr': args.lr,
+        'lr_alpha': args.lr_alpha,
+        'alpha_v_weight': args.alpha_v_weight,
         'entropy_update_rate': args.entropy_update_rate,
         'clip_value': args.clip_value,
     }
@@ -138,17 +148,23 @@ if __name__ == "__main__":
     if sac_baselines:
         agent_type += '_with_baselines'        
     agent = create_second_level_agent(agent_type=agent_type, noisy=noisy, n_heads=n_heads,
-                                        init_log_alpha=args.init_log_alpha, latent_dim=args.vision_latent_dim)
+                                        init_log_alpha=args.init_log_alpha, latent_dim=args.vision_latent_dim,
+                                        parallel=args.parallel_q_nets)
+    
     if args.load_id is not None:
         if args.load_best:
-            agent.load(MODEL_PATH + 'best_', args.load_id)
+            agent.load(MODEL_PATH + env_name + '/best_', args.load_id)
         else:
-            agent.load(MODEL_PATH, args.load_id)
+            agent.load(MODEL_PATH + env_name + '/last_', args.load_id)
+    agents = collections.deque(maxlen=args.n_agents)
+    agents.append(agent)
+    
+    os.makedirs(MODEL_PATH + env_name, exist_ok=True)
 
     database = ExperienceBuffer(buffer_size, level=2)
 
     trainer = Trainer(sac_baselines=sac_baselines, optimizer_kwargs=optimizer_kwargs)
-    returns = trainer.loop(env, agent, database, n_episodes=n_episodes, render=args.render, 
+    returns = trainer.loop(env, agents, database, n_episodes=n_episodes, render=args.render, 
                             max_episode_steps=n_steps_in_second_level_episode, 
                             store_video=store_video, wandb_project=wandb_project, 
                             MODEL_PATH=MODEL_PATH, train=(not args.eval),

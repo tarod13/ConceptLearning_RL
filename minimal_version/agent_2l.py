@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from policy_nets import s_Net
-from actor_critic_nets import vision_actor_critic_Net, vision_actor_critic_with_baselines_Net
+from actor_critic_nets import discrete_vision_actor_critic_Net, vision_actor_critic_with_baselines_Net
 from net_utils import freeze
 from utils import numpy2torch as np2torch
 from utils import time_stamp
@@ -19,12 +19,11 @@ def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_lev
 
 
 def create_second_level_agent(n_actions=3, first_level_s_dim=32, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
-                agent_type='vision_actor_critic', device='cuda', noisy=True):
+                agent_type='vision_actor_critic', device='cuda', noisy=True, parallel=True, lr=1e-4, lr_alpha=1e-4):
     first_level_actor = load_first_level_actor(second_level_a_dim=n_actions)
     if agent_type == 'vision_actor_critic':
-        second_level_architecture = vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action),
-                                                            n_heads, init_log_alpha=init_log_alpha, 
-                                                            latent_dim=latent_dim, noisy=noisy)
+        second_level_architecture = discrete_vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action),
+                                                        latent_dim, n_heads, init_log_alpha, parallel, lr, lr_alpha)
     elif agent_type == 'vision_actor_critic_with_baselines':
         second_level_architecture = vision_actor_critic_with_baselines_Net(first_level_s_dim, n_actions+int(noop_action), noisy=noisy)
     else:
@@ -84,8 +83,12 @@ class Second_Level_Agent(nn.Module):
         first_level_obs = np2torch(first_level_obs_np)
         return first_level_obs
     
-    def save(self, save_path):
-        torch.save(self.state_dict(), save_path + 'agent_2l_' + self._id)
+    def save(self, save_path, best=False):
+        if best:
+            model_path = save_path + 'best_agent_2l_' + self._id
+        else:
+            model_path = save_path + 'last_agent_2l_' + self._id
+        torch.save(self.state_dict(), model_path)
     
     def load(self, load_directory_path, model_id, device='cuda'):
         dev = torch.device(device)

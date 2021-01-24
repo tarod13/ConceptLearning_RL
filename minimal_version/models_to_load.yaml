@@ -1,0 +1,6 @@
+---
+env_model_pairs: 
+  AntSquareWall-v3: 2021-01-23_17-54-52
+  AntSquareTrack-v3: 2021-01-23_17-55-03
+  AntGather-v3: 2021-01-23_17-55-13
+  AntAvoid-v3: 2021-01-23_17-55-24

@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.nn.parameter import Parameter
+from torch.optim import Adam
 
 from custom_layers import parallel_Linear, Linear_noisy
+from vision_nets import vision_Net
 from net_utils import *
 
 use_cuda = torch.cuda.is_available()
@@ -37,8 +39,8 @@ class softmax_policy_Net(nn.Module):
             self.logit_pipe = nn.Sequential(
                 nn.Linear(s_dim, 256),
                 nn.ReLU(),
-                nn.Linear(256, 256),
-                nn.ReLU(),
+                # nn.Linear(256, 256),
+                # nn.ReLU(),
                 self.logits_layer            
             )        
             
@@ -48,6 +50,21 @@ class softmax_policy_Net(nn.Module):
         
     def forward(self, s):    
         logits = self.logit_pipe(s) 
+        PA_s = nn.Softmax(dim=1)(logits)
+        log_PA_s = nn.LogSoftmax(dim=1)(logits)
+        return PA_s, log_PA_s
+
+
+class vision_softmax_policy_Net(softmax_policy_Net):
+    def __init__(self, s_dim, latent_dim, n_actions, noisy=True, lr=1e-4):
+        super().__init__(s_dim + latent_dim, n_actions, noisy)        
+        self.vision_net = vision_Net(latent_dim=latent_dim, noisy=noisy)
+        self.optimizer = Adam(self.parameters(), lr=lr)
+        
+    def forward(self, inner_state, outer_state):    
+        features = self.vision_net(outer_state)
+        state = torch.cat([inner_state, features], dim=1)
+        logits = self.logit_pipe(state) 
         PA_s = nn.Softmax(dim=1)(logits)
         log_PA_s = nn.LogSoftmax(dim=1)(logits)
         return PA_s, log_PA_s
