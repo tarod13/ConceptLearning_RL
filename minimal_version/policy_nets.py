@@ -13,40 +13,38 @@ use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")
 
 
+# Discrete action space
+#-------------------------------------------------
 class softmax_policy_Net(nn.Module):
-    def __init__(self, s_dim, n_actions, noisy=True):
+    def __init__(self, s_dim, n_actions, noisy=False, lr=3e-4):
         super().__init__()
         
         self.s_dim = s_dim   
         self.n_actions = n_actions 
 
         if noisy:
-            self.logits_layer = Linear_noisy(256, n_actions)
-            self.logit_pipe = nn.Sequential(
-                Linear_noisy(s_dim, 256),
-                nn.ReLU(),
-                # Linear_noisy(256, 256),
-                # nn.ReLU(),
-                self.logits_layer            
-            )        
-            
-            # self.logit_pipe.apply(weights_init_rnd)
-            torch.nn.init.orthogonal_(self.logits_layer.mean_weight, 0.01)
-            self.logits_layer.mean_bias.data.zero_()
-        
+            layer = Linear_noisy
         else:
-            self.logits_layer = nn.Linear(256, n_actions)
-            self.logit_pipe = nn.Sequential(
-                nn.Linear(s_dim, 256),
-                nn.ReLU(),
-                # nn.Linear(256, 256),
-                # nn.ReLU(),
-                self.logits_layer            
-            )        
-            
+            layer = nn.Linear
+
+        self.logits_layer = layer(256, n_actions)
+        self.logit_pipe = nn.Sequential(
+            layer(s_dim, 256),
+            nn.ReLU(),
+            layer(256, 256),
+            nn.ReLU(),
+            self.logits_layer            
+        )        
+        
+        if not noisy:
             self.logit_pipe.apply(weights_init_rnd)
             torch.nn.init.orthogonal_(self.logits_layer.weight, 0.01)
             self.logits_layer.bias.data.zero_()
+        else:
+            torch.nn.init.orthogonal_(self.logits_layer.mean_weight, 0.01)
+            self.logits_layer.mean_bias.data.zero_()
+            
+        self.optimizer = Adam(self.parameters(), lr=lr)
         
     def forward(self, s):    
         logits = self.logit_pipe(s) 
@@ -70,18 +68,28 @@ class vision_softmax_policy_Net(softmax_policy_Net):
         return PA_s, log_PA_s
 
 
+# Continuous action space
+#-------------------------------------------------
 class actor_Net(nn.Module):
-    def __init__(self, s_dim, a_dim, min_logstd=1e-20, max_std=1e2):
+    def __init__(self, s_dim, a_dim, min_std=1e-20, max_std=1e2, noisy=False, lr=3e-4):
         super().__init__()   
         self.min_std = min_std
         self.max_std = max_std
         
-        self.l1 = nn.Linear(s_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l_mean = nn.Linear(256, a_dim)
-        self.l_logstd = nn.Linear(256, a_dim)
+        if noisy:
+            layer = Linear_noisy
+        else:
+            layer = nn.Linear
+
+        self.l1 = layer(s_dim, 256)
+        self.l2 = layer(256, 256)
+        self.l_mean = layer(256, a_dim)
+        self.l_logstd = layer(256, a_dim)
         
-        self.apply(weights_init_rnd)
+        if not noisy:
+            self.apply(weights_init_rnd)
+        
+        self.optimizer = Adam(self.parameters(), lr=lr)
     
     def forward(self, s):
         x = F.relu(self.l1(s))
@@ -96,58 +104,8 @@ class actor_Net(nn.Module):
         x = F.relu(self.l1(s))
         x = F.relu(self.l2(x))
         m = self.l_mean(x)
-        a = torch.tanh(u)        
+        a = torch.tanh(m)        
         return a
-
-    def sample_action(self, s, explore=True):
-        with torch.no_grad():
-            m, std = self(s)
-            if explore:
-                u = m + std*torch.randn_like(m)
-            else:
-                u = m
-            a = torch.tanh(u).squeeze(0).cpu().numpy()        
-            return a
-
-    def sample_actions_and_llhoods(self, s, explore=True):
-        m, std = self(s)
-        if explore:
-            u = m + std*torch.randn_like(m)
-        else:
-            u = m
-        a = torch.tanh(u)
-        
-        llhoods = Normal(m, std.abs()).log_prob(u)
-        llhoods -= torch.log(1 - a.pow(2) + 1e-6)
-        llhoods = llhoods.sum(1, keepdim=True)
-        return a, llhoods
-    
-    def llhoods(self, s, a):
-        m, std = self(s)
-        llhoods = Normal(m, std.abs()).log_prob(u)
-        llhoods -= torch.log(1 - a.pow(2) + 1e-6)
-        llhoods = llhoods.sum(1, keepdim=True)
-        return llhoods
-
-
-class noisy_actor_Net(nn.Module):
-    def __init__(self, s_dim, a_dim, min_std=1e-20, max_std=1e2):
-        super().__init__()   
-        self.min_std = min_std
-        self.max_std = max_std
-        
-        self.l1 = Linear_noisy(s_dim, 256)
-        self.l2 = Linear_noisy(256, 256)
-        self.l_mean = Linear_noisy(256, a_dim)
-        self.l_std = Linear_noisy(256, a_dim)
-    
-    def forward(self, s):
-        x = F.relu(self.l1(s))
-        x = F.relu(self.l2(x))
-        m = self.l_mean(x)
-        std = self.l_std(x)
-        std = torch.sign(std) * torch.clamp(std.abs(), self.min_std, self.max_std)
-        return m, std
 
     def sample_action(self, s, explore=True):
         with torch.no_grad():
@@ -261,13 +219,6 @@ class s_Net(nn.Module):
         ej = torch.randn(1, self.n_m_actions, mu.size(2)).to(device)
         eij = torch.sign(ei)*torch.sign(ej)*(ei).abs()**0.5*(ej).abs()**0.5
         x = F.relu(mu + eij*torch.exp(log_sigma))
-
-        # x = s.clone()
-        # if self.latent_dim > 0:
-        #     t = torch.randn(s.size(0), 1, self.latent_dim).repeat(1,self.n_m_actions,1).float().cuda()
-        #     x = torch.cat([x,t], 2)
-        # x1 = F.relu(self.l11(x))
-        # x1 = F.relu(self.l21(x1))
 
         m = self.l31(x)
         log_stdev = self.l32(x)

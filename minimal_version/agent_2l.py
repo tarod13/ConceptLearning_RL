@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from policy_nets import s_Net
-from actor_critic_nets import discrete_vision_actor_critic_Net, vision_actor_critic_with_baselines_Net
+from actor_critic_nets import discrete_vision_actor_critic_Net
 from net_utils import freeze
 from utils import numpy2torch as np2torch
 from utils import time_stamp
@@ -18,16 +18,13 @@ def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_lev
     return first_level_actor
 
 
-def create_second_level_agent(n_actions=3, first_level_s_dim=32, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
-                agent_type='vision_actor_critic', device='cuda', noisy=True, parallel=True, lr=1e-4, lr_alpha=1e-4):
+def create_second_level_agent(n_actions=3, first_level_s_dim=33, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
+                device='cuda', noisy=True, parallel=True, lr=1e-4, lr_alpha=1e-4, lr_actor=1e-4):
     first_level_actor = load_first_level_actor(second_level_a_dim=n_actions)
-    if agent_type == 'vision_actor_critic':
-        second_level_architecture = discrete_vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action),
-                                                        latent_dim, n_heads, init_log_alpha, parallel, lr, lr_alpha)
-    elif agent_type == 'vision_actor_critic_with_baselines':
-        second_level_architecture = vision_actor_critic_with_baselines_Net(first_level_s_dim, n_actions+int(noop_action), noisy=noisy)
-    else:
-        raise RuntimeError('Unkown agent type')
+    
+    second_level_architecture = discrete_vision_actor_critic_Net(first_level_s_dim, n_actions+int(noop_action),
+                                                    latent_dim, n_heads, init_log_alpha, parallel, lr, lr_alpha, lr_actor)
+
     second_level_agent = Second_Level_Agent(n_actions, second_level_architecture, first_level_actor, noop_action).to(device)
     return second_level_agent
 

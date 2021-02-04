@@ -9,6 +9,7 @@ from utils import numpy2torch as np2torch
 
 import wandb
 import argparse
+import os
 
 DEFAULT_ENV_NAME = 'PendulumMT-v0'
 DEFAULT_N_STEPS_IN_EPISODE = 200
@@ -17,11 +18,26 @@ DEFAULT_N_EPISODES = 500
 DEFAULT_DISCOUNT_FACTOR = 0.99
 DEFAULT_BATCH_SIZE = 256 
 DEFAULT_LR = 3e-4
-DEFAULT_INITIALIZATION = True
+DEFAULT_LR_ALPHA = 3e-4
+DEFAULT_INITIALIZATION = False
 DEFAULT_INITIAL_BUFFER_SIZE = 10000
 DEFAULT_NOISY_ACTOR_CRITIC = False
 DEFAULT_ACTIVE_MULTITASK = True
 DAFAULT_DC_TORQUE = True
+
+MODEL_PATH = '/home/researcher/Diego/Concept_Learning_minimal/saved_models/'
+project_name = 'multitaskSAC_first_level'
+
+def generate_agent(env, model_id, load_best=True, actor_critic_kwargs={}):
+    agent = create_first_level_multitask_agent(env, 
+        actor_critic_kwargs=actor_critic_kwargs)  
+    if model_id is not None:      
+        if load_best:
+            agent.load(MODEL_PATH + '/' + env.spec.id + '/best_', model_id)
+        else:
+            agent.load(MODEL_PATH + '/' + env.spec.id + '/last_', model_id)
+    return agent
+
 
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
@@ -36,28 +52,26 @@ if __name__ == "__main__":
     parser.add_argument("--discount_factor", default=DEFAULT_DISCOUNT_FACTOR, help="Discount factor (0,1), default=" + str(DEFAULT_DISCOUNT_FACTOR))
     parser.add_argument("--batch_size", default=DEFAULT_BATCH_SIZE, help="Batch size, default=" + str(DEFAULT_BATCH_SIZE))
     parser.add_argument("--lr", default=DEFAULT_LR, help="Learning rate, default=" + str(DEFAULT_LR))
+    parser.add_argument("--lr_alpha", default=DEFAULT_LR_ALPHA, help="Learning rate for temperature parameter alpha, default=" + str(DEFAULT_LR_ALPHA))
     parser.add_argument("--initialization", default=DEFAULT_INITIALIZATION, help="Initialize the replay buffer of the agent by acting randomly for a specified number of steps ")
     parser.add_argument("--init_buffer_size", default=DEFAULT_INITIAL_BUFFER_SIZE, help="Minimum replay buffer size to start learning, default=" + str(DEFAULT_INITIAL_BUFFER_SIZE))
     parser.add_argument("--load_id", default=None, help="Model ID to load, default=None")
     parser.add_argument("--load_best", action="store_true", help="If flag is used the best model will be loaded (if ID is provided)")
-    parser.add_argument("--noisy_ac", default=DEFAULT_NOISY_ACTOR_CRITIC, help="Use noisy layers in the actor-critic module")
+    parser.add_argument("--noisy", default=DEFAULT_NOISY_ACTOR_CRITIC, help="Use noisy layers in the actor-critic module")
     args = parser.parse_args()
 
-    MODEL_PATH = '/home/researcher/Diego/Concept_Learning_minimal/saved_models/'
-    project_name = 'multitaskSAC_first_level'
-    
+    os.makedirs(MODEL_PATH + args.env_name, exist_ok=True)
+
     # Set hyperparameters
-    env_name = args.env_name
-    n_steps_in_episode = args.n_steps_in_episode
-    buffer_size = args.buffer_size
     n_episodes = 1 if args.eval else args.n_episodes
-    initialization = args.initialization
-    init_buffer_size = args.init_buffer_size
-    noisy = args.noisy_ac
     optimizer_kwargs = {
         'batch_size': args.batch_size, 
         'discount_factor': args.discount_factor,
+    }
+    actor_critic_kwargs = {
+        'noisy': args.noisy, 
         'lr': args.lr,
+        'lr_alpha': args.lr_alpha,
     }
 
     store_video = args.eval
@@ -72,22 +86,18 @@ if __name__ == "__main__":
         wandb.config.active_multitask = DEFAULT_ACTIVE_MULTITASK
         wandb.config.active_dc_torque = DAFAULT_DC_TORQUE
 
-    env = gym.make(env_name)
+    env = gym.make(args.env_name)
 
-    agent = create_first_level_multitask_agent(env, noisy=noisy)
-    if args.load_id is not None:
-        if args.load_best:
-            agent.load(MODEL_PATH + 'best_', args.load_id)
-        else:
-            agent.load(MODEL_PATH, args.load_id)
+    agent = generate_agent(env, args.load_id, args.load_best, actor_critic_kwargs)
 
-    database = ExperienceBuffer(buffer_size, level=1)
+    database = ExperienceBuffer(args.buffer_size, level=1)
 
     trainer = Trainer(optimizer_kwargs=optimizer_kwargs)
+    
     returns = trainer.loop(env, agent, database, n_episodes=n_episodes, render=args.render, 
-                            max_episode_steps=n_steps_in_episode, 
+                            max_episode_steps=args.n_steps_in_episode, 
                             store_video=store_video, wandb_project=wandb_project, 
                             MODEL_PATH=MODEL_PATH, train=(not args.eval),
-                            initialization=initialization, init_buffer_size=init_buffer_size)
+                            initialization=args.initialization, init_buffer_size=args.init_buffer_size)
     G = returns.mean()    
     print("Mean episode return: {:.2f}".format(G)) 

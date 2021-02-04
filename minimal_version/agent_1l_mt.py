@@ -8,7 +8,7 @@ from utils import numpy2torch as np2torch
 from utils import time_stamp
 
 def create_first_level_multitask_agent(env, agent_type='multitask',
-                agent_architecture='actor_critic', device='cuda', noisy=True):
+                agent_architecture='actor_critic', device='cuda', actor_critic_kwargs={}):
     # Identify dimensions
     s_dim = env.observation_space['state'].shape[0]
     t_dim = env.observation_space['task'].shape[0]
@@ -17,7 +17,7 @@ def create_first_level_multitask_agent(env, agent_type='multitask',
     # Generate architecture and agent
     if agent_type == 'multitask':
         if agent_architecture == 'actor_critic':
-            architecture = actor_critic_Net(s_dim+t_dim, a_dim, noisy)
+            architecture = actor_critic_Net(s_dim+t_dim, a_dim, **actor_critic_kwargs)
         else:
             raise RuntimeError('Unkown agent architecture')
     else:
@@ -57,12 +57,17 @@ class First_Level_Multitask_Agent(nn.Module):
             raise RuntimeError('Undefined case. TODO or invalid type.')
         return full_state
 
-    def save(self, save_path):
-        torch.save(self.state_dict(), save_path + 'agent_1l_mt_' + self._id)
+    def save(self, save_path, best=False):
+        if best:
+            model_path = save_path + 'best_agent_1l_mt_' + self._id
+        else:
+            model_path = save_path + 'last_agent_1l_mt_' + self._id
+        torch.save(self.state_dict(), model_path)
     
     def load(self, load_directory_path, model_id, device='cuda'):
         dev = torch.device(device)
         self.load_state_dict(torch.load(load_directory_path + 'agent_1l_mt_' + model_id, map_location=dev))
+
 
 
 if __name__ == "__main__":

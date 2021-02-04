@@ -3,6 +3,7 @@ import torch
 import random
 import time
 import datetime
+import yaml
 
 
 def numpy2torch(np_array, device='cuda'):
@@ -48,3 +49,12 @@ def cat_state_task(observation):
     task = observation['task']
     obs = np.concatenate((state, task))
     return obs
+
+def load_env_model_pairs(file):
+    yaml_file = open(file, 'r')
+    try:
+        env_model_pairs = yaml.load(yaml_file, Loader=yaml.FullLoader)['env_model_pairs']
+        assert isinstance(env_model_pairs, dict)
+    except:
+        raise RuntimeError('Invalid file. It should be a dictionary with name "env_model_pairs"')
+    return env_model_pairs

@@ -11,22 +11,23 @@ from utils import numpy2torch as np2torch
 from utils import time_stamp
 
 
-def load_first_level_agent(env, load_id, noisy=True, load_best=True,
+def load_first_level_agent(env, load_id, load_best=True, actor_critic_kwargs={'noisy':False},
                 MODEL_PATH='/home/researcher/Diego/Concept_Learning_minimal/saved_models/'
                 ):
-    first_level_agent = create_first_level_multitask_agent(env, noisy=noisy)    
+    first_level_agent = create_first_level_multitask_agent(env, actor_critic_kwargs=actor_critic_kwargs)    
     if load_best:
-        first_level_agent.load(MODEL_PATH + 'best_', load_id)
+        first_level_agent.load(MODEL_PATH + env.spec.id + '/best_', load_id)
     else:
-        first_level_agent.load(MODEL_PATH, load_id)
+        first_level_agent.load(MODEL_PATH + env.spec.id + '/last_', load_id)
     return first_level_agent
 
 
-def create_SA_conceptual_agent(env, load_id, n_concepts={'state': 10, 'action': 4}, 
-                                load_best=True, device='cuda', noisy=True):
+def create_conceptual_agent(env, load_id, n_concepts={'state': 10, 'action': 4}, 
+    load_best=True, device='cuda', actor_critic_kwargs={'noisy':False}, noisy=False,
+    init_log_alpha=1.0):
     
     # Load first level agent
-    first_level_agent = load_first_level_agent(env, load_id, load_best=load_best, noisy=noisy)
+    first_level_agent = load_first_level_agent(env, load_id, load_best=load_best, actor_critic_kwargs=actor_critic_kwargs)
 
     if first_level_agent._type == 'multitask':
         # Identify dimensions
@@ -35,13 +36,14 @@ def create_SA_conceptual_agent(env, load_id, n_concepts={'state': 10, 'action': 
         a_dim = env.action_space.shape[0]
         
         concept_architecture = SA_concept_Net(s_dim+t_dim, n_concepts['state'], 
-                                                a_dim+t_dim, n_concepts['action'], noisy=noisy)
+                                a_dim+t_dim, n_concepts['action'], noisy,
+                                init_log_alpha)
 
-        conceptual_agent = conceptual_Agent(concept_architecture, first_level_agent, s_dim, a_dim, t_dim).to(device)
+        conceptual_agent = Conceptual_Agent(concept_architecture, first_level_agent, s_dim, a_dim, t_dim).to(device)
     else:
         raise RuntimeError('Invalid agent type')
     
-    return concept_agent
+    return conceptual_agent
 
 
 class Conceptual_Agent(nn.Module):
@@ -69,17 +71,20 @@ class Conceptual_Agent(nn.Module):
 
     def observe_action(self, state_observations, actions):
         tasks = state_observations[:,self._s_dim:]
-        action_observations = np.concatenate((actions, tasks))
+        action_observations = torch.cat([actions, tasks], dim=1)
         return action_observations
    
     def save(self, save_path):
-        torch.save(self.state_dict(), save_path + 'agent_2l_' + self._id)
+        torch.save(self.state_dict(), save_path + 'agent_c_SA_' + self._id)
     
     def load(self, load_directory_path, model_id, device='cuda'):
         dev = torch.device(device)
-        self.load_state_dict(torch.load(load_directory_path + 'agent_2l_' + model_id, map_location=dev))
+        self.load_state_dict(torch.load(load_directory_path + 'agent_c_SA_' + model_id, map_location=dev))
 
 
 if __name__ == "__main__":
-    agent = create_concept_agent()
-    print("Successful second level agent creation")
+    import gym
+    env = gym.make('PendulumMT-v0')
+    load_id = '2021-01-24_11-56-00'
+    agent = create_conceptual_agent(env, load_id)
+    print("Successful conceptual agent creation")
