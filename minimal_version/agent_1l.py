@@ -113,8 +113,7 @@ class Agent:
     def learn_skills(self, only_metrics=False):
         batch = self.memory.sample(self.batch_size)
         batch = np.array(batch)
-        batch_size = batch.shape[0]
-        
+        batch_size = batch.shape[0]        
 
         if batch_size > 0:
             s_batch = torch.FloatTensor(batch[:,self.dims['init_ext']:self.dims['last_ext']]).to(device)
@@ -129,8 +128,7 @@ class Agent:
                 # Optimize q networks
                 q1_E = self.critic1(s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
                 q2_E = self.critic2(s_batch, a_batch)[np.arange(batch_size), T_batch].view(-1,1)
-                next_v_E = self.v_target(ns_batch)[np.arange(batch_size), T_batch].view(-1,1)
-               
+                next_v_E = self.v_target(ns_batch)[np.arange(batch_size), T_batch].view(-1,1)               
 
                 q_approx_E = r_batch + self.gamma_E * next_v_E * (1-d_batch)
                 
@@ -150,7 +148,7 @@ class Agent:
             a_batch_A, log_pa_sApT_A = self.actor.sample_actions_and_llhoods_for_all_skills(s_batch_prop.detach())
             A_batch = T_batch
             a_batch_off = a_batch_A[np.arange(batch_size), A_batch, :]
-            log_pa_sT = log_pa_sApT_A[np.arange(batch_size), A_batch].view(-1,1)
+            log_pa_sT = log_pa_sApT_A[np.arange(batch_size), A_batch, A_batch].view(-1,1)
             
             q1_off_E = self.critic1(s_batch.detach(), a_batch_off)
             q2_off_E = self.critic2(s_batch.detach(), a_batch_off)

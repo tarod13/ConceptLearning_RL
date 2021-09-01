@@ -106,9 +106,10 @@ class System:
         self.min_action = self.envs[0].action_space.low[0]
         self.max_action = self.envs[0].action_space.high[0]
 
-        n_tasks = self.n_tasks
+        self.n_MT_tasks = self.n_tasks
         self.multitask_envs = False
         self.check_multitask()
+        n_tasks = self.n_MT_tasks if self.multitask_envs else self.n_tasks
         self.agent = Agent(self.s_dim, self.a_dim, n_tasks, agent_params, seed=self.seed)               
 
     def check_multitask(self):
@@ -304,10 +305,8 @@ class System:
 
         if start_render: self.envs[self.task].render()
         if eval_epsds == 0: 
-            if self.multitask_envs:
-                eval_epsds = self.epsds['eval'] * self.n_MT_tasks
-            else:
-                eval_epsds = self.epsds['eval'] * self.n_tasks
+            n_tasks = self.n_MT_tasks if self.multitask_envs else self.n_tasks
+            eval_epsds = self.epsds['eval'] * n_tasks
         
         events = []
         rewards = []
