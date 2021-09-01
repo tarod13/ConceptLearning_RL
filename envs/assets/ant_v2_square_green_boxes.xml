@@ -1,0 +1,227 @@
+<mujoco model="ant">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true" settotalmass="40" eulerseq="XYZ"/>
+  <option integrator="RK4" timestep="0.005"/>
+  <custom>
+    <numeric data="0.0 0.0 0.55 1.0 0.0 0.0 0.0 0.0 1.0 0.0 -1.0 0.0 -1.0 0.0 1.0" name="init_qpos"/>
+  </custom>
+  <default>
+    <joint armature="1" damping="1" limited="true"/>
+    <geom conaffinity="1" contype="1" condim="3" density="5.0" friction="1 0.5 0.5" margin="0.01" rgba="0.8 0.6 0.4 1" material="geom"/>
+  </default>
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1=".1 .12 .15" rgb2="0 0 0" width="100" height="100"/>
+        <texture builtin="checker" height="100" name="texplane" rgb1=".35 .65 .65" rgb2=".0 .4 0.6" type="2d" width="100"/>
+        <material name="MatPlane" reflectance="0.25" shininess="1" specular="1" texrepeat="50 50" texture="texplane"/>
+        <texture builtin="flat" height="1278" mark="cross" markrgb="1 1 1" name="texgeom" random="0.01" rgb1="0.8 0.6 0.4" rgb2="0.8 0.6 0.4" type="cube" width="127"/>
+        <material name="geom" texture="texgeom" texuniform="true"/>
+    </asset>
+  <worldbody>
+    <light directional="true" cutoff="100" exponent="1" diffuse="1 1 1" specular=".1 .1 .1" pos="0 0 1.3" dir="-0 0 -1.3" />
+    <geom name='floor' material="MatPlane" pos='0 0 0' size='40 40 40' type='plane' rgba='0.9 0.9 0.9 1' condim='3' group="1"/>
+
+    <geom name="wall-0" pos=" -0.5 -10.5  0.5" rgba="1. 1. 1. 1" size="10.5   0.5  1.0" type="box" material="" group="1" />
+    <geom name="wall-1" pos="-10.5   0.5  0.5" rgba="1. 1. 1. 1" size=" 0.5  10.5  1.0" type="box" material="" group="1" />
+    <geom name="wall-2" pos="  0.5  10.5  0.5" rgba="1. 1. 1. 1" size="10.5   0.5  1.0" type="box" material="" group="1" />    
+    <geom name="wall-3" pos=" 10.5  -0.5  0.5" rgba="1. 1. 1. 1" size=" 0.5  10.5  1.0" type="box" material="" group="1" />
+
+    <site name="s-wall-0" pos=" -0.5 -10.5  0.5" rgba="1. 1. 1. 1" size="10.55   0.55  1.0" type="box" material="" group="1" />
+    <site name="s-wall-1" pos="-10.5   0.5  0.5" rgba="1. 1. 1. 1" size=" 0.55  10.55  1.0" type="box" material="" group="1" />
+    <site name="s-wall-2" pos="  0.5  10.5  0.5" rgba="1. 1. 1. 1" size="10.55   0.55  1.0" type="box" material="" group="1" />    
+    <site name="s-wall-3" pos=" 10.5  -0.5  0.5" rgba="1. 1. 1. 1" size=" 0.55  10.55  1.0" type="box" material="" group="1" />
+
+    <body name="target_g0" pos = "9 0 0.8">
+      <site name="t00" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t01" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t02" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t03" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t04" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g1" pos = "7 0 0.8">
+      <site name="t10" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t11" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t12" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t13" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t14" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g2" pos = "5 0 0.8">
+      <site name="t20" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t21" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t22" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t23" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t24" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g3" pos = "1 0 0.8">
+      <site name="t30" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t31" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t32" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t33" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t34" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g4" pos = "-1 0 0.8">
+      <site name="t40" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t41" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t42" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t43" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t44" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g5" pos = "-5 0 0.8">
+      <site name="t50" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t51" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t52" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t53" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t54" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g6" pos = "-7 0 0.8">
+      <site name="t60" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t61" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t62" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t63" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t64" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g7" pos = "-9 0 0.8">
+      <site name="t70" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t71" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t72" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t73" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t74" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g8" pos = "9 6 0.8">
+      <site name="t80" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t81" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t82" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t83" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t84" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g9" pos = "7 6 0.8">
+      <site name="t90" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t91" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t92" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t93" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t94" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g10" pos = "5 6 0.8">
+      <site name="t100" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t101" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t102" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t103" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t104" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <body name="target_g11" pos = "3 6 0.8">
+      <site name="t110" pos=" 0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t111" pos="-0.75  0.0  0.0 " rgba="0.0 1.0 0.0 0.4" size="0.01 0.75  0.75" type="box" group="1"/>
+      <site name="t112" pos=" 0.0   0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t113" pos=" 0.0  -0.75 0.0 " rgba="0.0 1.0 0.0 0.4" size="0.75 0.01  0.75" type="box" group="1"/>
+      <site name="t114" pos=" 0.0   0.0  0.75" rgba="0.0 1.0 0.0 0.4" size="0.75 0.75  0.01" type="box" group="1"/>
+    </body> 
+
+    <camera name="global_camera" mode="fixed" pos="0 0 30.0" xyaxes="1 0 0 0 1 0"/>
+    <camera name="global_camera_2" mode="fixed" pos="-15.5 -15.5 25.0" euler="40 0 -45"/>
+
+    <body name="torso" pos="0 0 0.75">
+      <geom name="torso_geom" pos="0 0 0" size="0.50 0.25 0.25" type="ellipsoid"/>
+      <body name="head" pos="0.4 0 0.25">
+	<camera name="front_camera" mode="fixed" pos="-0.1 0 0" euler="90 0 -90"/>
+        <geom name="head_geom" density="0.01" rgba="1.0 0.5 0.3 1" pos="0.0 0.0 0.0" size="0.25" type="sphere"/>
+        <site name="head_site" pos="0.0 0.0 0.0" size="0.005" type="sphere"/>
+      </body>
+      <joint armature="0" damping="0" limited="false" margin="0.01" name="root" pos="0 0 0" type="free"/>
+      <body name="front_left_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 0.2 0.2 0.0" name="aux_1_geom" size="0.08" type="capsule"/>
+        <body name="aux_1" pos="0.4 0.2 0">
+          <joint axis="0 0 1" name="hip_1" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 0.2 0.2 0.0" name="front_left_leg_geom" size="0.08" type="capsule"/>
+          <site fromto="0.0 0.0 0.0 0.2 0.2 0.0" name="front_left_leg_site" size="0.005" type="capsule"/>
+          <body name="aux_11" pos="0.2 0.2 0">
+            <joint axis="-1 1 0" name="ankle_1" pos="0.0 0.0 0.0" range="30 70" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 0.4 0.4 0.0" name="front_left_ankle_geom" size="0.08" type="capsule"/>
+            <site fromto="0.0 0.0 0.0 0.4 0.4 0.0" name="front_left_ankle_site" size="0.005" type="capsule"/>
+          </body>
+        </body>
+      </body>
+      <body name="front_right_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 -0.2 0.2 0.0" name="aux_2_geom" size="0.08" type="capsule"/>
+        <body name="aux_2" pos="-0.2 0.2 0">
+          <joint axis="0 0 1" name="hip_2" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 -0.2 0.2 0.0" name="front_right_leg_geom" size="0.08" type="capsule"/>
+          <body name="aux_22" pos="-0.2 0.2 0">
+            <joint axis="1 1 0" name="ankle_2" pos="0.0 0.0 0.0" range="-70 -30" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 -0.4 0.4 0.0" name="front_right_ankle_geom" size="0.08" type="capsule"/>
+          </body>
+        </body>
+      </body>
+      <body name="back_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 -0.2 -0.2 0.0" name="aux_3_geom" size="0.08" type="capsule"/>
+        <body name="aux_3" pos="-0.2 -0.2 0">
+          <joint axis="0 0 1" name="hip_3" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 -0.2 -0.2 0.0" name="left_back_leg_geom" size="0.08" type="capsule"/>
+          <body name="aux_33" pos="-0.2 -0.2 0">
+            <joint axis="-1 1 0" name="ankle_3" pos="0.0 0.0 0.0" range="-70 -30" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 -0.4 -0.4 0.0" name="left_back_ankle_geom" size="0.08" type="capsule"/>
+          </body>
+        </body>
+      </body>
+      <body name="right_back_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 0.2 -0.2 0.0" name="aux_4_geom" size="0.08" type="capsule"/>
+        <body name="aux_4" pos="0.4 -0.2 0">
+          <joint axis="0 0 1" name="hip_4" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 0.2 -0.2 0.0" name="right_back_leg_geom" size="0.08" type="capsule"/>
+          <body name="aux_44" pos="0.2 -0.2 0">
+            <joint axis="1 1 0" name="ankle_4" pos="0.0 0.0 0.0" range="30 70" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 0.4 -0.4 0.0" name="right_back_ankle_geom" size="0.08" type="capsule"/>
+          </body>
+        </body>
+      </body>
+    </body>
+    <site name="target_0" pos="  9 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_1" pos="  7 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_2" pos="  5 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_3" pos="  1 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_4" pos=" -1 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_5" pos=" -5 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_6" pos=" -7 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_7" pos=" -9 0 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_8" pos="  9 6 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_9" pos="  7 6 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_10" pos=" 5 6 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+    <site name="target_11" pos=" 3 6 0.0" rgba="0.5 0.1 0.1 0.0" size="0.8  0.8  1.6" type="box" group="1" />
+  </worldbody>
+  <actuator>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_4" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_4" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_1" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_1" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_2" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_2" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_3" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_3" gear="150"/>
+  </actuator>
+  <sensor>
+    <touch site="s-wall-0" cutoff="200"/>
+    <touch site="s-wall-1" cutoff="200"/>
+    <touch site="s-wall-2" cutoff="200"/>
+    <touch site="s-wall-3" cutoff="200"/>
+    <touch site="target_0"/>
+    <touch site="target_1"/>
+    <touch site="target_2"/>
+    <touch site="target_3"/>
+    <touch site="target_4"/>
+    <touch site="target_5"/>
+    <touch site="target_6"/>
+    <touch site="target_7"/>
+    <touch site="target_8"/>
+    <touch site="target_9"/>
+    <touch site="target_10"/>
+    <touch site="target_11"/>
+  </sensor>
+</mujoco>

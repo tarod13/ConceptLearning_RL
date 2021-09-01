@@ -28,6 +28,15 @@
     <geom name="wall-6" pos=" 9.0  -5.5  0.5" rgba="1. 1. 1. 1" size=" 5.0  0.5 1.0" type="box" material="" group="1" />
     <geom name="wall-7" pos=" 9.0 -12.5  0.5" rgba="1. 1. 1. 1" size="12.0  0.5 1.0" type="box" material="" group="1" />
 
+    <site name="s-wall-0" pos="-3.5   0.0  0.5" rgba="1. 1. 1. 1" size=" 0.5 13.0 1.0" type="box" material="" group="1" />
+    <site name="s-wall-1" pos=" 3.5   0.0  0.5" rgba="1. 1. 1. 1" size=" 0.5  6.0 1.0" type="box" material="" group="1" />
+    <site name="s-wall-2" pos="14.5   0.0  0.5" rgba="1. 1. 1. 1" size=" 0.5  6.0 1.0" type="box" material="" group="1" />    
+    <site name="s-wall-3" pos="21.5   0.0  0.5" rgba="1. 1. 1. 1" size=" 0.5 13.0 1.0" type="box" material="" group="1" />
+    <site name="s-wall-4" pos=" 9.0  12.5  0.5" rgba="1. 1. 1. 1" size="12.0  0.5 1.0" type="box" material="" group="1" />
+    <site name="s-wall-5" pos=" 9.0   5.5  0.5" rgba="1. 1. 1. 1" size=" 5.0  0.5 1.0" type="box" material="" group="1" />
+    <site name="s-wall-6" pos=" 9.0  -5.5  0.5" rgba="1. 1. 1. 1" size=" 5.0  0.5 1.0" type="box" material="" group="1" />
+    <site name="s-wall-7" pos=" 9.0 -12.5  0.5" rgba="1. 1. 1. 1" size="12.0  0.5 1.0" type="box" material="" group="1" />
+
     <camera name="global_camera" mode="fixed" pos="9.0 0 35.0" xyaxes="1 0 0 0 1 0"/>
     <camera name="global_camera_2" mode="fixed" pos="-6.5 -15.5 25.0" euler="40 0 -45"/>
 
@@ -99,7 +108,13 @@
     <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_3" gear="150"/>
   </actuator>
   <sensor>
-    <force name='force_head' site='head_site' />
-    <force name='force_front_left_leg' site='front_left_leg_site' />
+    <touch site="s-wall-0" cutoff="200"/>
+    <touch site="s-wall-1" cutoff="200"/>
+    <touch site="s-wall-2" cutoff="200"/>
+    <touch site="s-wall-3" cutoff="200"/>
+    <touch site="s-wall-4" cutoff="200"/>
+    <touch site="s-wall-5" cutoff="200"/>
+    <touch site="s-wall-6" cutoff="200"/>
+    <touch site="s-wall-7" cutoff="200"/>
   </sensor>
 </mujoco>

@@ -24,6 +24,11 @@
     <geom name="wall-2" pos="  0.5  10.5  0.5" rgba="1. 1. 1. 1" size="10.5   0.5  1.0" type="box" material="" group="1" />    
     <geom name="wall-3" pos=" 10.5  -0.5  0.5" rgba="1. 1. 1. 1" size=" 0.5  10.5  1.0" type="box" material="" group="1" />
 
+    <site name="s-wall-0" pos=" -0.5 -10.5  0.5" rgba="1. 1. 1. 1" size="10.5   0.5  1.0" type="box" material="" group="1" />
+    <site name="s-wall-1" pos="-10.5   0.5  0.5" rgba="1. 1. 1. 1" size=" 0.5  10.5  1.0" type="box" material="" group="1" />
+    <site name="s-wall-2" pos="  0.5  10.5  0.5" rgba="1. 1. 1. 1" size="10.5   0.5  1.0" type="box" material="" group="1" />    
+    <site name="s-wall-3" pos=" 10.5  -0.5  0.5" rgba="1. 1. 1. 1" size=" 0.5  10.5  1.0" type="box" material="" group="1" />
+
     <camera name="global_camera" mode="fixed" pos="0 0 30.0" xyaxes="1 0 0 0 1 0"/>
     <camera name="global_camera_2" mode="fixed" pos="-15.5 -15.5 25.0" euler="40 0 -45"/>
 
@@ -82,19 +87,30 @@
         </body>
       </body>
     </body>
-    <geom name="target_0" pos=" 9  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_1" pos=" 7  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_2" pos=" 5  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_3" pos=" 3  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_4" pos="-3  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_5" pos="-5  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_6" pos="-7  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_7" pos="-9  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_8" pos="-9  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_9" pos="-9  0 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_10" pos="-9  6 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    <geom name="target_11" pos="-9  -6 0.85" rgba="0 1 0 0.4" size="0.75" type="sphere" group="1" contype="0" conaffinity="0" />
-    
+    <site name="target_0" pos=" 9  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_1" pos=" 7  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_2" pos=" 5  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_3" pos=" 3  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_4" pos="-3  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_5" pos="-5  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_6" pos="-7  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_7" pos="-9  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_8" pos="-9  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_9" pos="-9  0 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_10" pos="-9  6 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <site name="target_11" pos="-9  6 0.85" rgba="0.05 0.7 0.1 0.0" size="0.85" type="sphere" group="1" />
+    <geom name="target_g0" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g1" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g2" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g3" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g4" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g5" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g6" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g7" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g8" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g9" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g10" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
+    <geom name="target_g11" pos=" 9  0 0.85" rgba="0.0 1.0 0.0 0.4" size="0.85" type="sphere" group="1" contype="0" conaffinity="0" />
   </worldbody>
   <actuator>
     <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_4" gear="150"/>
@@ -107,7 +123,21 @@
     <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_3" gear="150"/>
   </actuator>
   <sensor>
-    <force name='force_head' site='head_site' />
-    <force name='force_front_left_leg' site='front_left_leg_site' />
+    <touch site="s-wall-0" cutoff="400"/>
+    <touch site="s-wall-1" cutoff="400"/>
+    <touch site="s-wall-2" cutoff="400"/>
+    <touch site="s-wall-3" cutoff="400"/>
+    <touch site="target_0" cutoff="400"/>
+    <touch site="target_1" cutoff="400"/>
+    <touch site="target_2" cutoff="400"/>
+    <touch site="target_3" cutoff="400"/>
+    <touch site="target_4" cutoff="400"/>
+    <touch site="target_5" cutoff="400"/>
+    <touch site="target_6" cutoff="400"/>
+    <touch site="target_7" cutoff="400"/>
+    <touch site="target_8" cutoff="400"/>
+    <touch site="target_9" cutoff="400"/>
+    <touch site="target_10" cutoff="400"/>
+    <touch site="target_11" cutoff="400"/>
   </sensor>
 </mujoco>
