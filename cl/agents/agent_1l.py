@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 
-from ..nets.nets_seq import Memory, v_Net, q_Net, s_Net
+from nets.nets_seq import Memory, v_Net, q_Net, s_Net
 from utils import updateNet
 
 use_cuda = torch.cuda.is_available()

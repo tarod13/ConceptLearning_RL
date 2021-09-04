@@ -3,12 +3,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from actor_critic_nets import actor_critic_Net
+from nets.actor_critic_nets import actor_critic_Net
 from utils import numpy2torch as np2torch
 from utils import time_stamp
 
 def create_first_level_multitask_agent(env, agent_type='multitask',
-                agent_architecture='actor_critic', device='cuda', actor_critic_kwargs={}):
+                agent_architecture='actor_critic', device='cuda', 
+                actor_critic_kwargs={}):
     # Identify dimensions
     s_dim = env.observation_space['state'].shape[0]
     t_dim = env.observation_space['task'].shape[0]
@@ -17,12 +18,14 @@ def create_first_level_multitask_agent(env, agent_type='multitask',
     # Generate architecture and agent
     if agent_type == 'multitask':
         if agent_architecture == 'actor_critic':
-            architecture = actor_critic_Net(s_dim+t_dim, a_dim, **actor_critic_kwargs)
+            architecture = actor_critic_Net(
+                s_dim+t_dim, a_dim, **actor_critic_kwargs)
         else:
             raise RuntimeError('Unkown agent architecture')
     else:
         raise RuntimeError('Unkown agent type')
-    first_level_multitask_agent = First_Level_Multitask_Agent(s_dim, t_dim, a_dim, architecture, agent_type).to(device)
+    first_level_multitask_agent = First_Level_Multitask_Agent(
+        s_dim, t_dim, a_dim, architecture, agent_type).to(device)
 
     return first_level_multitask_agent
 
@@ -44,7 +47,8 @@ class First_Level_Multitask_Agent(nn.Module):
     def sample_action(self, observation, explore=True):
         full_state = self.observe_state(observation)
         with torch.no_grad():
-            action = self.architecture.sample_action(full_state, explore=explore)            
+            action = self.architecture.sample_action(
+                full_state, explore=explore)            
             return action
     
     def observe_state(self, observation):
@@ -66,7 +70,8 @@ class First_Level_Multitask_Agent(nn.Module):
     
     def load(self, load_directory_path, model_id, device='cuda'):
         dev = torch.device(device)
-        self.load_state_dict(torch.load(load_directory_path + 'agent_1l_mt_' + model_id, map_location=dev))
+        file_path = load_directory_path + 'agent_1l_mt_' + model_id
+        self.load_state_dict(torch.load(file_path, map_location=dev))
 
 
 

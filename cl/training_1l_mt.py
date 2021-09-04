@@ -1,7 +1,7 @@
 import numpy as np
 
 import gym
-from agent_1l_mt import create_first_level_multitask_agent 
+from agents.agent_1l_mt import create_first_level_multitask_agent 
 from buffers import ExperienceBuffer
 from trainers import First_Level_Trainer as Trainer
 

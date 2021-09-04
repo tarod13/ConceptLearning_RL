@@ -35,27 +35,27 @@ class System:
         
         self.params = params
         default_params = {
-                            'seed': 1000,
-                            'env_names': [],
-                            'env_steps': 1, 
-                            'grad_steps': 1, 
-                            'init_steps': 10000,
-                            'max_episode_steps': 1000,
-                            'tr_steps': 1000,
-                            'tr_epsd': 4000,
-                            'eval_epsd': 10,
-                            'eval_epsd_interval': 20,
-                            'eval_steps': 1000,
-                            'batch_size': 256, 
-                            'render': True, 
-                            'reset_when_done': True, 
-                            'store_video': False,
-                            'storing_path': '',
-                            'MT_steps': 200,
-                            'active_RND': True,
-                            'masked_done': True,
-                            'active_MC': True                           
-                        }
+            'seed': 1000,
+            'env_names': [],
+            'env_steps': 1, 
+            'grad_steps': 1, 
+            'init_steps': 10000,
+            'max_episode_steps': 1000,
+            'tr_steps': 1000,
+            'tr_epsd': 4000,
+            'eval_epsd': 10,
+            'eval_epsd_interval': 20,
+            'eval_steps': 1000,
+            'batch_size': 256, 
+            'render': True, 
+            'reset_when_done': True, 
+            'store_video': False,
+            'storing_path': '',
+            'MT_steps': 200,
+            'active_RND': True,
+            'masked_done': True,
+            'active_MC': True,
+            }
 
         for key, value in default_params.items():
             if key not in self.params.keys():
@@ -290,7 +290,11 @@ class System:
                 np.savetxt(storing_path + '/mean_rewards.txt', np.array(rewards))
 
 
-    def eval_agent_skills(self, eval_epsds=0, explore=False, iter_=0, start_render=False, print_space=True, specific_path='video', max_step=0, task=None, store_events=True):
+    def eval_agent_skills(self, eval_epsds=0, explore=False, 
+            iter_=0, start_render=False, print_space=True, 
+            specific_path='video', max_step=0, task=None, 
+            store_events=True):
+
         if task is None:   
             task = self.task
             self.task = 0
