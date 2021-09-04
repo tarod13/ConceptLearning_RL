@@ -19,7 +19,7 @@ env_name = 'AntMT-v3'
 tr_episodes = 1000
 folder = '/home/researcher/Diego/ConceptLearning_RL/saved/'
 
-train = False
+train = True
 eval = True
 
 
@@ -67,12 +67,12 @@ def run(last_iter, path, env_name, tr_episodes, train, eval,
     if eval:
         system.set_envs()
         rewards, events, metric_vector, epsd_lengths = system.eval_agent_skills(
-            eval_epsds=100, explore=False, iter_=0, start_render=True, 
+            eval_epsds=10, explore=False, iter_=0, start_render=True, 
             print_space=True, specific_path='video', max_step=0, task=eval_task)
-        np.savetxt(os.path.join(path, '/eval_rewards_'+str(eval_task)+'.txt'), np.array(rewards))
-        np.savetxt(os.path.join(path, '/eval_events_'+str(eval_task)+'.txt'), np.array(events))
-        np.savetxt(os.path.join(path, '/eval_metrics_'+str(eval_task)+'.txt'), np.array(metric_vector))
-        np.savetxt(os.path.join(path, '/eval_lengths_'+str(eval_task)+'.txt'), np.array(epsd_lengths))
+        np.savetxt(os.path.join(path, 'eval_rewards_'+str(eval_task)+'.txt'), np.array(rewards))
+        np.savetxt(os.path.join(path, 'eval_events_'+str(eval_task)+'.txt'), np.array(events))
+        np.savetxt(os.path.join(path, 'eval_metrics_'+str(eval_task)+'.txt'), np.array(metric_vector))
+        np.savetxt(os.path.join(path, 'eval_lengths_'+str(eval_task)+'.txt'), np.array(epsd_lengths))
 
 
 if __name__ == "__main__":
