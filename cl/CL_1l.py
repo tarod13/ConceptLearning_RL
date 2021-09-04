@@ -10,7 +10,7 @@ import gym
 from gym.utils import seeding
 
 from utils import scale_action, set_seed
-from agent_1l import Agent
+from agents.agent_1l import Agent
 
 import cv2
 from cv2 import VideoWriter, VideoWriter_fourcc
