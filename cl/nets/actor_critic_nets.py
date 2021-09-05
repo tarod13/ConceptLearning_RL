@@ -1,19 +1,15 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.distributions import Normal, Categorical
+from torch.distributions import Categorical
 from torch.nn.parameter import Parameter
 from torch.optim import Adam
 
-from policy_nets import *
-from q_nets import *
-from vision_nets import vision_Net
-from net_utils import *
+from nets.policy_nets import actor_Net, vision_softmax_policy_Net
+from nets.q_nets import q_Net, vision_multihead_dueling_q_Net
+from nets.net_utils import updateNet
 
 use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")
-
 
 
 class actor_critic_Net(nn.Module):
@@ -76,7 +72,7 @@ class discrete_vision_actor_critic_Net(nn.Module):
         self.q_target = vision_multihead_dueling_q_Net(s_dim, latent_dim, n_actions, n_heads, lr)
         self.update(rate=1.0)
         
-        self.actor = vision_softmax_policy_Net(s_dim, latent_dim, n_actions, noisy=False, lr=lr_alpha) 
+        self.actor = vision_softmax_policy_Net(s_dim, latent_dim, n_actions, noisy=False, lr=lr_actor) 
 
         self.log_alpha = Parameter(torch.Tensor(1))
         nn.init.constant_(self.log_alpha, init_log_alpha)

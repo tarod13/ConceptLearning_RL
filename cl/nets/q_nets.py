@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 
-from custom_layers import Linear_noisy, parallel_Linear
-from vision_nets import vision_Net
-from net_utils import *
+from nets.custom_layers import Linear_noisy, parallel_Linear
+from nets.vision_nets import vision_Net
+from nets.net_utils import weights_init_rnd
 
 use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")

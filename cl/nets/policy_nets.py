@@ -5,9 +5,9 @@ from torch.distributions import Normal
 from torch.nn.parameter import Parameter
 from torch.optim import Adam
 
-from custom_layers import parallel_Linear, Linear_noisy
-from vision_nets import vision_Net
-from net_utils import *
+from nets.custom_layers import parallel_Linear, Linear_noisy
+from nets.vision_nets import vision_Net
+from nets.net_utils import weights_init_rnd, weights_init_
 
 use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")

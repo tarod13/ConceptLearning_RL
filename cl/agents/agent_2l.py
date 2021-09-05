@@ -3,22 +3,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from policy_nets import s_Net
-from actor_critic_nets import discrete_vision_actor_critic_Net
-from net_utils import freeze
+from nets.policy_nets import s_Net
+from nets.actor_critic_nets import discrete_vision_actor_critic_Net
+from nets.net_utils import freeze
 from utils import numpy2torch as np2torch
 from utils import time_stamp
 
 
 def load_first_level_actor(second_level_a_dim=3, first_level_s_dim=91, first_level_a_dim=8, 
-                first_level_actor_path="/home/researcher/Diego/Concept_Learning_Ant/Test/19/102_actor_sl.pt"):
+                first_level_actor_path="/home/researcher/Diego/ConceptLearning_RL/saved/L1/20/200_actor.pt"):
     first_level_actor = s_Net(second_level_a_dim, first_level_s_dim, first_level_a_dim)
     first_level_actor.load_state_dict(torch.load(first_level_actor_path))
     first_level_actor._a_dim = first_level_a_dim
     return first_level_actor
 
 
-def create_second_level_agent(n_actions=3, first_level_s_dim=33, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
+def create_second_level_agent(n_actions=3, first_level_s_dim=31, latent_dim=256, n_heads=8, init_log_alpha=0.0, noop_action=True,
                 device='cuda', noisy=True, parallel=True, lr=1e-4, lr_alpha=1e-4, lr_actor=1e-4):
     first_level_actor = load_first_level_actor(second_level_a_dim=n_actions)
     

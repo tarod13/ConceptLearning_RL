@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from custom_layers import Linear_noisy
-from net_utils import *
+from nets.custom_layers import Linear_noisy
+from nets.net_utils import weights_init_he, get_conv_out
 
 use_cuda = torch.cuda.is_available()
 device   = torch.device("cuda" if use_cuda else "cpu")

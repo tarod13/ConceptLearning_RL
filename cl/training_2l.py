@@ -1,52 +1,57 @@
-import numpy as np
-
-import gym
-from gym.wrappers.pixel_observation import PixelObservationWrapper
-from agent_2l import create_second_level_agent
-from buffers import ExperienceBuffer
-from trainers import Second_Level_Trainer as Trainer
-
-from utils import numpy2torch as np2torch
-from wrappers import AntPixelWrapper
-
-import wandb
 import argparse
 import os
 import collections
 
+import gym
+from gym.wrappers.pixel_observation import PixelObservationWrapper
+
+from wrappers import AntPixelWrapper
+from agents.agent_2l import create_second_level_agent
+from buffers.buffers import ExperienceBuffer
+from trainers.trainers import Second_Level_Trainer as Trainer
+
+import wandb
+
+
 DEFAULT_ENV_NAME = 'AntSquareWall-v3'
-DEFAULT_N_STEPS_IN_SECOND_LEVEL_EPISODE = 600
-DEFAULT_BUFFER_SIZE = 200000
-DEFAULT_N_EPISODES = 3000
-DEFAULT_ID = '2001-01-15_19-10-56'
-DEFAULT_CLIP_VALUE = 1.0
-DEFAULT_CONTROL_COST = 2e-1
-DEFAULT_COLLISION_DETECTION = False
-DEFAULT_CONTACT_COST = 0.0
-DEFAULT_HEALTHY_REWARD = 1.0e-1
-DEFAULT_DEAD_COST = 0.0
-DEFAULT_DISCOUNT_FACTOR = 0.99
+
 DEFAULT_BATCH_SIZE = 64 
-DEFAULT_MIN_EPSILON = 0.05
-DEFAULT_INIT_EPSILON = 0.05
-DEFAULT_DELTA_EPSILON = 1e-5
-DEFAULT_ENTROPY_FACTOR = 0.05
-DEFAULT_ENTROPY_UPDATE_RATE = 0.005
-DEFAULT_WEIGHT_Q_LOSS = 0.5
-DEFAULT_INIT_LOG_ALPHA = 1.0
-DEFAULT_LR = 1e-4 # wrong value: 3e-5
-DEFAULT_LR_ALPHA = 1e-4 # wrong value: 1e-6
-DEFAULT_ALPHA_V_WEIGHT = 0
-DEFAULT_INITIALIZATION = False
-DEFAULT_INITIAL_BUFFER_SIZE = 500
-DEFAULT_NOISY_ACTOR_CRITIC = False
+DEFAULT_BUFFER_SIZE = 200000
+
+DEFAULT_N_EPISODES = 600
+DEFAULT_N_STEPS_IN_SECOND_LEVEL_EPISODE = 600
+DEFAULT_N_STEP_TD = 1
 DEFAULT_SAVE_STEP_EACH = 1
 DEFAULT_TRAIN_EACH = 8
-DEFAULT_N_STEP_TD = 1
-DEFAULT_PARALLEL_Q_NETS = True
-DEFAULT_N_HEADS = 2
-DEFAULT_VISION_LATENT_DIM = 64
+
+DEFAULT_COLLISION_DETECTION = False
+DEFAULT_CONTACT_COST = 0.0
+DEFAULT_CONTROL_COST = 2e-1
+DEFAULT_DEAD_COST = 0.0
+DEFAULT_HEALTHY_REWARD = 1.0e-1
+
+DEFAULT_ALPHA_V_WEIGHT = 0
+DEFAULT_INIT_LOG_ALPHA = 1.0
+DEFAULT_LR_ALPHA = 1e-4 # wrong value: 1e-6
+DEFAULT_CLIP_VALUE = 1.0
+DEFAULT_DELTA_EPSILON = 1e-5
+DEFAULT_INIT_EPSILON = 0.05
+DEFAULT_MIN_EPSILON = 0.05
+DEFAULT_DISCOUNT_FACTOR = 0.99
+DEFAULT_ENTROPY_FACTOR = 0.05
+DEFAULT_ENTROPY_UPDATE_RATE = 0.005
+DEFAULT_LR = 1e-4 # wrong value: 3e-5
+DEFAULT_WEIGHT_Q_LOSS = 0.5
+
+DEFAULT_ID = '2001-01-15_19-10-56'
+DEFAULT_INITIAL_BUFFER_SIZE = 500
+DEFAULT_INITIALIZATION = False
+
 DEFAULT_N_AGENTS = 1
+DEFAULT_N_HEADS = 2
+DEFAULT_NOISY_ACTOR_CRITIC = False
+DEFAULT_PARALLEL_Q_NETS = True
+DEFAULT_VISION_LATENT_DIM = 64
 
 
 if __name__ == "__main__":    
@@ -90,7 +95,7 @@ if __name__ == "__main__":
     render_kwargs = {'pixels': {'width':168,
                             'height':84,
                             'camera_name':'front_camera'}}
-    MODEL_PATH = '/home/researcher/Diego/Concept_Learning_minimal/saved_models/'
+    MODEL_PATH = '/home/researcher/Diego/ConceptLearning_RL/saved/L2/'
     project_name = 'visualSAC_second_level'
     
     # Set hyperparameters

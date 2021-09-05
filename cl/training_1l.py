@@ -17,7 +17,7 @@ n_test = 0
 last_iter = 0
 env_name = 'AntMT-v3'
 tr_episodes = 1000
-folder = '/home/researcher/Diego/ConceptLearning_RL/saved/'
+folder = '/home/researcher/Diego/ConceptLearning_RL/saved/L1/'
 
 train = True
 eval = True
